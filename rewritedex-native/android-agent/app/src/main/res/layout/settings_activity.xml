@@ -1,0 +1,170 @@
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#121212">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="RewriteDEX"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:textColor="#e8eaed"
+            android:paddingBottom="4dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Pixel Desktop Bridge • Settings"
+            android:textSize="14sp"
+            android:textColor="#9aa0a6"
+            android:paddingBottom="20dp" />
+
+        <!-- Appearance -->
+        <TextView
+            style="@style/SectionHeader"
+            android:text="Appearance" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/dex_card_bg"
+            android:padding="16dp"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Dark theme"
+                android:textColor="#e8eaed"
+                android:textSize="16sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Match the DeX-style dark interface"
+                android:textColor="#9aa0a6"
+                android:textSize="13sp"
+                android:paddingBottom="8dp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/themeSwitch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Enable dark theme"
+                android:textColor="#e8eaed" />
+        </LinearLayout>
+
+        <!-- Streaming -->
+        <TextView
+            style="@style/SectionHeader"
+            android:text="Streaming (host controlled)" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/dex_card_bg"
+            android:padding="16dp"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Quality Profile"
+                android:textColor="#e8eaed"
+                android:textSize="16sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Affects video bitrate / fps on the Windows side"
+                android:textColor="#9aa0a6"
+                android:textSize="13sp"
+                android:paddingBottom="8dp" />
+
+            <Spinner
+                android:id="@+id/qualityProfileSpinner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:backgroundTint="#8ab4f8" />
+        </LinearLayout>
+
+        <!-- Notifications -->
+        <TextView
+            style="@style/SectionHeader"
+            android:text="Notifications" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/dex_card_bg"
+            android:padding="16dp"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/notificationSettingsButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Open notification access settings"
+                android:backgroundTint="#1f252b"
+                android:textColor="#8ab4f8" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Required for mirroring Android notifications to Windows"
+                android:textColor="#9aa0a6"
+                android:textSize="12sp"
+                android:paddingTop="6dp" />
+        </LinearLayout>
+
+        <!-- Advanced -->
+        <TextView
+            style="@style/SectionHeader"
+            android:text="Advanced" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/dex_card_bg"
+            android:padding="16dp">
+
+            <Button
+                android:id="@+id/restartServiceButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Restart agent service"
+                android:layout_marginBottom="8dp"
+                android:backgroundTint="#1f252b"
+                android:textColor="#8ab4f8" />
+
+            <Button
+                android:id="@+id/exportLogsButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Export diagnostics log"
+                android:backgroundTint="#1f252b"
+                android:textColor="#8ab4f8" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Changes to streaming quality require restarting the desktop from the Windows tray."
+            android:textColor="#9aa0a6"
+            android:textSize="12sp"
+            android:paddingTop="20dp"
+            android:gravity="center" />
+
+    </LinearLayout>
+</ScrollView>

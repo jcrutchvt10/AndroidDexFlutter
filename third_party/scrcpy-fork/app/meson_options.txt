@@ -1,0 +1,10 @@
+# RewriteDEX fork: vendored from upstream scrcpy v4.1 meson_options.txt.
+# Must sit next to meson.build for meson's `option()` lookups to resolve.
+# Upstream uses type='boolean' (NOT 'feature') because the v4l2/usb guards
+# are simple truthiness checks (`get_option('v4l2') and host_machine...`).
+# FeatureOptionHolder does NOT support bool() coercion — must be boolean.
+option('v4l2', type : 'boolean', value : false)
+option('usb', type : 'boolean', value : false)
+option('static', type : 'boolean', value : false)
+option('portable', type : 'boolean', value : false)
+option('server_debugger', type : 'boolean', value : false)

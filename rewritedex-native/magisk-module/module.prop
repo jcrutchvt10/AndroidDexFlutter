@@ -1,0 +1,6 @@
+id=rewritedex-desktop-wallpaper
+name=RewriteDEX Desktop Wallpaper
+version=2.2.0
+versionCode=220
+author=RewriteDEX
+description=Provides a native rotating fallback wallpaper only for Android desktop displays.

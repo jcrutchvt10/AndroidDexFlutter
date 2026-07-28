@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest sequence that triggers the issue.
+      placeholder: |
+        1. Connect Pixel over USB
+        2. Launch RewriteDEX
+        3. Open an app from the drawer
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: Pixel 9 Pro XL, Android build, rooted/non-rooted
+    validations:
+      required: false
+  - type: input
+    id: windows
+    attributes:
+      label: Windows / Qt
+      placeholder: Windows 11, Qt 6.11.1 MSVC
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the relevant `dex_debug.log` tail. Remove serials or personal data if needed.
+      render: text
+    validations:
+      required: false

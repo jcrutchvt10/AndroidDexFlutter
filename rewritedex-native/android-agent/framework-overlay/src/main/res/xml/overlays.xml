@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<overlay xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        target="string/fallback_wallpaper_component"
+        value="@string/rewritedex_fallback_wallpaper_component" />
+</overlay>

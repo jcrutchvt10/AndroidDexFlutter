@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "ninja",
+      "displayName": "Ninja (default)",
+      "description": "Configure using the Ninja generator",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "vs2022",
+      "displayName": "Visual Studio 2022 (legacy)",
+      "description": "Generate Visual Studio 17 2022 solution files; legacy/optional IDE workflow. New development prefers the \"vs2026\" preset on hosts with VS 2026, or the \"ninja\" preset for any host.",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build"
+    },
+    {
+      "name": "vs2026",
+      "displayName": "Visual Studio 2026 (Ninja, MSVC auto-detected)",
+      "description": "Build with the MSVC toolchain from the highest installed Visual Studio (Ninja backend with auto-detection). On hosts whose newest Visual Studio is 2026, Ninja picks MSVC 18.x automatically — no explicit CMAKE_GENERATOR_INSTANCE is required. Equivalent to the 'ninja' preset; provided for naming consistency so users can run `cmake --preset vs2026`.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+# Build dirs
+build/
+build-msvc/
+build-msvc-ninja/
+build-mingw-qt/
+out/
+
+# IDE
+*.obj
+*.user
+*.autosave
+.vs/
+.idea/
+CMakeLists.txt.user
+.gradle/
+local.properties
+*.apk
+
+# Binaries / copied tools (repo uses third_party/scrcpy; build dir copies)
+rewritedex.exe
+rewritedex-launcher.exe
+/scrcpy/
+/dex_agent/
+/dex_coordinator/
+*.log
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+!third_party/scrcpy/*.dll
+!third_party/scrcpy/*.exe
+!third_party/dex_agent/**/*.dll
+!third_party/dex_agent/**/*.exe
+
+# CMake / Ninja / Qt generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+.qt/
+.rcc/
+*_autogen/
+*.aotstats
+
+# Local env / agent session noise
+.env
+.env.*
+!.env.example
+.remember/
+.codex/
+.agents/
+.claude/
+.mcp.json
+
+# Screenshots / one-off debug captures
+screen-*.png
+*_screen_capture.png
+sim-*.txt
+sim-*.ps1
+
+# Packaging outputs
+AndroidDEX-*.zip
+*.7z
+*.msi
+*.nupkg
+
+# OS
+Thumbs.db
+.DS_Store
+nul

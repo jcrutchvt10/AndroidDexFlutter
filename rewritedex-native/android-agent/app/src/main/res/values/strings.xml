@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">RewriteDEX Native</string>
+    <string name="desktop_wallpaper_description">Native rotating backgrounds for the RewriteDEX desktop display</string>
+</resources>

@@ -1,0 +1,19 @@
+plugins { id 'com.android.application'; id 'org.jetbrains.kotlin.android' }
+
+android { namespace 'com.rewritedex.nativeagent'; compileSdk 36
+    defaultConfig { applicationId 'com.rewritedex.nativeagent'; minSdk 29; targetSdk 36; versionCode 6; versionName '2.3.0' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.16.0'
+    implementation 'androidx.core:core:1.16.0'
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.activity:activity-ktx:1.7.2'
+    implementation 'androidx.appcompat:appcompat-resources:1.6.1'
+    // Coroutines for structured async waits (replacing busy Thread.sleep polling)
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+    testImplementation 'junit:junit:4.13.2'
+}

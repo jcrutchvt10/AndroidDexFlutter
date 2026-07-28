@@ -1,0 +1,10 @@
+RewriteDEX scrcpy fork build
+date=2026-07-22
+version=scrcpy 4.1 client/server exact match
+mode=desktop-transport (alias of flex-display)
+resize=300ms trailing-edge debounce, even pixels, WM base-density preservation
+logical-size=600-900dp clamp; controller target short side 700dp
+display=trusted, system decorations, own display group, own focus, always unlocked
+runtime=controller pins SCRCPY_SERVER_PATH to adjacent scrcpy-server
+input=UHID keyboard, SDK absolute mouse (no capture), freeform via agent; Alt+Tab/Alt+F4, Win+W close
+integration=audio, clipboard autosync, file drop to /sdcard/Download

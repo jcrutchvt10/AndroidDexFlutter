@@ -1,0 +1,4 @@
+build/
+android-agent/.gradle/
+android-agent/build/
+android-agent/local.properties

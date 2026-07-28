@@ -1,0 +1,7 @@
+<resources>
+    <string-array name="quality_profiles">
+        <item>Responsive</item>
+        <item>Balanced</item>
+        <item>Maximum quality</item>
+    </string-array>
+</resources>

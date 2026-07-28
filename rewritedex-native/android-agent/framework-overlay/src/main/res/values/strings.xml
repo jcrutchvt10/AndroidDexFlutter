@@ -1,0 +1,3 @@
+<resources>
+    <string name="rewritedex_fallback_wallpaper_component" translatable="false">com.rewritedex.nativeagent/com.rewritedex.nativeagent.DesktopWallpaperService</string>
+</resources>
