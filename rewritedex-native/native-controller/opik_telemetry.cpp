@@ -9,7 +9,6 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <thread>
 
 #include "json.h"
 
@@ -45,6 +44,25 @@ const Config& config() {
         return result;
     }();
     return value;
+}
+
+// Fire-and-forget telemetry send. CreateThread (not std::thread) keeps this
+// file buildable with mingw win32-threads toolchains as well as MSVC.
+bool sendTrace(const Config& settings, const std::string& method, const std::string& path, int statusCode, long long latencyMs);
+
+struct SendContext {
+    Config settings;
+    std::string method;
+    std::string path;
+    int statusCode;
+    long long latencyMs;
+};
+
+DWORD WINAPI sendTraceThreadProc(LPVOID parameter) {
+    auto* context = static_cast<SendContext*>(parameter);
+    sendTrace(context->settings, context->method, context->path, context->statusCode, context->latencyMs);
+    delete context;
+    return 0;
 }
 
 std::string uuid() {
@@ -160,9 +178,10 @@ void trackAgentRequest(
     if (path == "/desktop/input") return;
     const Config& settings = config();
     if (settings.apiKey.empty() || settings.workspace.empty()) return;
-    std::thread([settings, method, path, statusCode, latencyMs] {
-        sendTrace(settings, method, path, statusCode, latencyMs);
-    }).detach();
+    auto* context = new SendContext{settings, method, path, statusCode, latencyMs};
+    const HANDLE thread = CreateThread(nullptr, 0, sendTraceThreadProc, context, 0, nullptr);
+    if (!thread) delete context;
+    else CloseHandle(thread);
 }
 
 } // namespace opik

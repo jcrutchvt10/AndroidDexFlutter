@@ -20,7 +20,6 @@ import android.view.Display
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.io.BufferedReader
-import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -40,8 +39,6 @@ import org.json.JSONException
 import org.json.JSONObject
 
 class DexAgentService : Service() {
-    private data class ShellResult(val exitCode: Int, val output: String)
-
     private data class RequestHeaders(val contentLength: Int, val token: String?)
 
     private data class HostEvent(
@@ -258,33 +255,33 @@ class DexAgentService : Service() {
             val query = requestTarget.substringAfter('?', "")
             val headers = readHeaders(input)
             if (headers.contentLength < 0) {
-                writeResponse(connection, 400, errorResponse("invalid content length"))
+                writeResponse(connection, AgentResponse.error(400, "invalid content length"))
                 return
             }
             if (headers.contentLength > MAX_BODY_BYTES) {
                 if (headers.contentLength <= MAX_REJECTED_BODY_BYTES) {
                     discardBody(input, headers.contentLength)
                 }
-                writeResponse(connection, 413, errorResponse("request body too large", 413))
+                writeResponse(connection, AgentResponse.error(413, "request body too large", 413))
                 return
             }
             val body = readBody(input, headers.contentLength)
 
             if (!validToken(headers.token)) {
-                writeResponse(connection, 401, errorResponse("unauthorized", 401))
+                writeResponse(connection, AgentResponse.error(401, "unauthorized", 401))
                 return
             }
 
-            val (status, response) = try {
+            val response = try {
                 route(method, path, body, query)
             } catch (error: JSONException) {
-                400 to errorResponse(error.message ?: "invalid JSON")
+                AgentResponse.error(400, error.message ?: "invalid JSON")
             } catch (error: IllegalArgumentException) {
-                400 to errorResponse(error.message ?: "invalid request")
+                AgentResponse.error(400, error.message ?: "invalid request")
             } catch (error: Exception) {
-                500 to errorResponse(error.message ?: "request failed", 500)
+                AgentResponse.error(500, error.message ?: "request failed", 500)
             }
-            writeResponse(connection, status, response)
+            writeResponse(connection, response)
         }
     }
 
@@ -334,31 +331,121 @@ class DexAgentService : Service() {
         }
     }
 
-    private fun route(method: String, path: String, body: String, query: String = ""): Pair<Int, JSONObject> = when {
-        method == "GET" && path == "/api/v1/apps" -> 200 to appInventoryResponse()
-        method == "GET" && path == "/api/v1/events" -> 200 to hostEventsResponse(query)
-        method == "GET" && path == "/status" -> 200 to status()
-        method == "GET" && path == "/tasks" -> 200 to tasksResponse()
-        method == "GET" && path == "/session" -> 200 to sessionResponse()
-        method == "GET" && path == "/profiles" -> 200 to profilesResponse()
-        method == "GET" && path == "/workspaces" -> 200 to WorkspaceStore.response(preferences)
-        method == "GET" && path == "/notifications" -> 200 to notificationsResponse()
-        method == "GET" && path == "/exports" -> 200 to exportsResponse()
-        method == "GET" && path == "/wallpaper" -> 200 to wallpaperStatus()
-        method == "POST" && path == "/launch" -> 200 to launch(JSONObject(body))
-        method == "POST" && path == "/task" -> 200 to taskAction(JSONObject(body))
-        method == "POST" && path == "/system" -> 200 to systemAction(JSONObject(body))
-        method == "POST" && path == "/desktop/input" -> 200 to markDesktopInput(JSONObject(body))
-        method == "POST" && path == "/root/request" -> 200 to requestRootAccess()
-        method == "POST" && path == "/profiles" -> 200 to updateProfile(JSONObject(body))
-        method == "POST" && path == "/wallpaper" -> 200 to wallpaperAction(JSONObject(body))
-        method == "POST" && path == "/session/save" -> 200 to saveSession()
-        method == "POST" && path == "/workspace/save" -> 200 to saveWorkspace(JSONObject(body))
-        method == "POST" && path == "/workspace/restore" -> 200 to restoreWorkspace(JSONObject(body))
-        method == "POST" && path == "/workspace/delete" -> 200 to deleteWorkspace(JSONObject(body))
-        method == "POST" && path == "/notifications/clear" -> 200 to clearNotifications()
-        method == "POST" && path == "/exports/ack" -> 200 to acknowledgeExport(JSONObject(body))
-        else -> 404 to JSONObject().put("ok", false).put("error", "not found")
+    private fun route(method: String, path: String, body: String, query: String = ""): AgentResponse = when {
+        method == "GET" && path == "/api/v1/apps" -> AgentResponse.ok(appInventoryResponse())
+        method == "GET" && path == "/api/v1/events" -> AgentResponse.ok(hostEventsResponse(query))
+        method == "GET" && path == "/api/v1/settings" -> AgentResponse.ok(settingsResponse())
+        method == "PUT" && path == "/api/v1/settings" -> AgentResponse.ok(updateSettings(JSONObject(body)))
+        method == "GET" && path.startsWith("/api/v1/app-icons/") ->
+            appIconResponse(path.removePrefix("/api/v1/app-icons/"))
+        method == "GET" && path == "/status" -> AgentResponse.ok(status())
+        method == "GET" && path == "/tasks" -> AgentResponse.ok(tasksResponse())
+        method == "GET" && path == "/session" -> AgentResponse.ok(sessionResponse())
+        method == "GET" && path == "/profiles" -> AgentResponse.ok(profilesResponse())
+        method == "GET" && path == "/workspaces" -> AgentResponse.ok(WorkspaceStore.response(preferences))
+        method == "GET" && path == "/notifications" -> AgentResponse.ok(notificationsResponse())
+        method == "GET" && path == "/exports" -> AgentResponse.ok(exportsResponse())
+        method == "GET" && path == "/wallpaper" -> AgentResponse.ok(wallpaperStatus())
+        method == "POST" && path == "/launch" -> AgentResponse.ok(launch(JSONObject(body)))
+        method == "POST" && path == "/task" -> AgentResponse.ok(taskAction(JSONObject(body)))
+        method == "POST" && path == "/system" -> AgentResponse.ok(systemAction(JSONObject(body)))
+        method == "POST" && path == "/desktop/input" -> AgentResponse.ok(markDesktopInput(JSONObject(body)))
+        method == "POST" && path == "/root/request" -> AgentResponse.ok(requestRootAccess())
+        method == "POST" && path == "/profiles" -> AgentResponse.ok(updateProfile(JSONObject(body)))
+        method == "POST" && path == "/wallpaper" -> AgentResponse.ok(wallpaperAction(JSONObject(body)))
+        method == "POST" && path == "/session/save" -> AgentResponse.ok(saveSession())
+        method == "POST" && path == "/workspace/save" -> AgentResponse.ok(saveWorkspace(JSONObject(body)))
+        method == "POST" && path == "/workspace/restore" -> AgentResponse.ok(restoreWorkspace(JSONObject(body)))
+        method == "POST" && path == "/workspace/delete" -> AgentResponse.ok(deleteWorkspace(JSONObject(body)))
+        method == "POST" && path == "/notifications/clear" -> AgentResponse.ok(clearNotifications())
+        method == "POST" && path == "/exports/ack" -> AgentResponse.ok(acknowledgeExport(JSONObject(body)))
+        else -> AgentResponse.notFound()
+    }
+
+    /**
+     * Returns the rounded launcher-icon PNG for a package, rendering and
+     * caching it on first request. Metadata-only (never app data or intents).
+     */
+    private fun appIconResponse(packageName: String): AgentResponse {
+        val pkg = packageName.substringBefore('/').trim()
+        if (!PACKAGE_PATTERN.matches(pkg)) {
+            return AgentResponse.error(400, "invalid package name")
+        }
+        val bytes = IconCache.cachedIcon(this, pkg)
+            ?: return AgentResponse.error(404, "icon unavailable")
+        return AgentResponse.png(bytes)
+    }
+
+    /** Unified typed settings surface; the host shell is the primary UI. */
+    private fun settingsResponse(): JSONObject {
+        val wallpaper = wallpaperPreferences()
+        return JSONObject()
+            .put("ok", true)
+            .put("apiVersion", 1)
+            .put(
+                "settings",
+                JSONObject()
+                    .put(SettingsStore.KEY_DARK_THEME, preferences.getBoolean(SettingsStore.KEY_DARK_THEME, false))
+                    .put(
+                        SettingsStore.KEY_QUALITY_PROFILE,
+                        preferences.getInt(SettingsStore.KEY_QUALITY_PROFILE, SettingsStore.DEFAULT_QUALITY_PROFILE),
+                    )
+                    .put(
+                        SettingsStore.KEY_WALLPAPER,
+                        JSONObject()
+                            .put(SettingsStore.KEY_WALLPAPER_INDEX, DesktopWallpaperService.currentIndex(wallpaper))
+                            .put(
+                                SettingsStore.KEY_WALLPAPER_INTERVAL,
+                                wallpaper.getInt(
+                                    DesktopWallpaperService.KEY_INTERVAL_MINUTES,
+                                    DesktopWallpaperService.DEFAULT_INTERVAL_MINUTES,
+                                ),
+                            )
+                            .put(
+                                SettingsStore.KEY_WALLPAPER_DIM,
+                                wallpaper.getFloat(
+                                    DesktopWallpaperService.KEY_DIM,
+                                    DesktopWallpaperService.DEFAULT_DIM,
+                                ),
+                            ),
+                    ),
+            )
+    }
+
+    private fun updateSettings(request: JSONObject): JSONObject {
+        val settings = SettingsStore.validate(request.getJSONObject("settings"))
+        if (settings.has(SettingsStore.KEY_DARK_THEME)) {
+            preferences.edit()
+                .putBoolean(SettingsStore.KEY_DARK_THEME, settings.getBoolean(SettingsStore.KEY_DARK_THEME))
+                .apply()
+        }
+        if (settings.has(SettingsStore.KEY_QUALITY_PROFILE)) {
+            val profile = settings.getInt(SettingsStore.KEY_QUALITY_PROFILE)
+            preferences.edit().putInt(SettingsStore.KEY_QUALITY_PROFILE, profile).apply()
+            // Streaming quality is primarily controlled from the Windows host
+            // (scrcpy spawn args). Persist the hint here for agent-side use.
+            Log.i(TAG, "Applied quality profile hint from settings: $profile")
+        }
+        val wallpaper = wallpaperPreferences()
+        settings.optJSONObject(SettingsStore.KEY_WALLPAPER)?.let { validated ->
+            validated.optInt(SettingsStore.KEY_WALLPAPER_INDEX, -1)
+                .takeIf { it >= 0 }
+                ?.let { index ->
+                    require(index in DesktopWallpaperService.THEMES.indices) { "invalid wallpaper index" }
+                    wallpaper.edit().putInt(DesktopWallpaperService.KEY_INDEX, index).apply()
+                }
+            validated.optInt(SettingsStore.KEY_WALLPAPER_INTERVAL, -1)
+                .takeIf { it >= 0 }
+                ?.let { interval ->
+                    wallpaper.edit().putInt(DesktopWallpaperService.KEY_INTERVAL_MINUTES, interval).apply()
+                }
+            validated.optDouble(SettingsStore.KEY_WALLPAPER_DIM, -1.0)
+                .takeIf { it >= 0 }
+                ?.let { dim ->
+                    wallpaper.edit().putFloat(DesktopWallpaperService.KEY_DIM, dim.toFloat()).apply()
+                }
+        }
+        return settingsResponse()
     }
 
     /**
@@ -374,10 +461,12 @@ class DexAgentService : Service() {
             .filter { it.activityInfo.packageName !in SESSION_EXCLUDED_PACKAGES }
             .filter { (it.activityInfo.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
             .map { info ->
+                val packageName = info.activityInfo.packageName
                 JSONObject()
-                    .put("package", info.activityInfo.packageName)
+                    .put("package", packageName)
                     .put("component", info.activityInfo.name)
                     .put("label", info.loadLabel(packageManager)?.toString().orEmpty())
+                    .put("icon", "/api/v1/app-icons/$packageName")
             }
             .distinctBy { it.getString("package") }
             .sortedBy { it.getString("label").lowercase() }
@@ -1677,21 +1766,16 @@ class DexAgentService : Service() {
     }
 
     private fun notificationsResponse(): JSONObject {
-        val storage = getSharedPreferences(DesktopNotificationListenerService.PREFERENCES, MODE_PRIVATE)
-        val notifications = try {
-            JSONArray(storage.getString(DesktopNotificationListenerService.KEY_ENTRIES, "[]"))
-        } catch (_: Exception) {
-            JSONArray()
-        }
+        val storage = getSharedPreferences(NotificationStore.PREFERENCES, MODE_PRIVATE)
         return JSONObject()
             .put("ok", true)
             .put("enabled", notificationAccessEnabled())
-            .put("notifications", notifications)
+            .put("notifications", NotificationStore.list(storage))
     }
 
     private fun clearNotifications(): JSONObject {
-        getSharedPreferences(DesktopNotificationListenerService.PREFERENCES, MODE_PRIVATE)
-            .edit().remove(DesktopNotificationListenerService.KEY_ENTRIES).apply()
+        getSharedPreferences(NotificationStore.PREFERENCES, MODE_PRIVATE)
+            .let(NotificationStore::clear)
         return JSONObject().put("ok", true)
     }
 
@@ -1866,7 +1950,7 @@ class DexAgentService : Service() {
     }
 
     private fun requestRootAccess(): JSONObject {
-        val result = runRoot("id -u", ROOT_APPROVAL_TIMEOUT_SECONDS)
+        val result = RootShell.run("id -u", RootShell.APPROVAL_TIMEOUT_SECONDS)
         rootAvailable = result.exitCode == 0 && result.output.trim() == "0"
         rootCheckedAt = System.currentTimeMillis()
         return JSONObject()
@@ -1979,49 +2063,15 @@ class DexAgentService : Service() {
         runRoot("cmd input_method hide")
     }
 
-    private fun runRoot(command: String, timeoutSeconds: Long = ROOT_COMMAND_TIMEOUT_SECONDS): ShellResult {
-        val process = ProcessBuilder("su", "-c", command)
-            .redirectErrorStream(true)
-            .start()
-        val output = ByteArrayOutputStream()
-        val reader = Thread({
-            try {
-                process.inputStream.use { input ->
-                    val buffer = ByteArray(4096)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (output.size() < MAX_SHELL_OUTPUT_BYTES) {
-                            output.write(buffer, 0, minOf(count, MAX_SHELL_OUTPUT_BYTES - output.size()))
-                        }
-                    }
-                }
-            } catch (error: Exception) {
-                // A timed-out root command closes its stream from the caller
-                // thread. Do not let that expected interruption crash the FGS.
-                Log.w(TAG, "Root command output reader stopped", error)
-            }
-        }, "rewritedex-shell-output").apply {
-            isDaemon = true
-            start()
-        }
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-            process.destroyForcibly()
-            process.waitFor(1, TimeUnit.SECONDS)
-            process.inputStream.close()
-            reader.join(1_000)
-            return ShellResult(-1, "command timed out")
-        }
-        reader.join(1_000)
-        return ShellResult(process.exitValue(), output.toString(Charsets.UTF_8.name()))
-    }
+    private fun runRoot(command: String, timeoutSeconds: Long = RootShell.DEFAULT_TIMEOUT_SECONDS): ShellResult =
+        RootShell.run(command, timeoutSeconds)
 
     private fun requirePackage(packageName: String): String {
         require(PACKAGE_PATTERN.matches(packageName)) { "invalid package name" }
         return packageName
     }
 
-    private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+    private fun shellQuote(value: String): String = RootShell.quote(value)
 
     private fun JSONObject.toRect(): Rect {
         val rect = Rect(getInt("left"), getInt("top"), getInt("right"), getInt("bottom"))
@@ -2044,9 +2094,8 @@ class DexAgentService : Service() {
     private fun errorResponse(msg: String, code: Int = 400): JSONObject =
         JSONObject().put("ok", false).put("error", msg).put("code", code)
 
-    private fun writeResponse(socket: Socket, status: Int, body: JSONObject) {
-        val bytes = body.toString().toByteArray(Charsets.UTF_8)
-        val reason = when (status) {
+    private fun writeResponse(socket: Socket, response: AgentResponse) {
+        val reason = when (response.status) {
             200 -> "OK"
             400 -> "Bad Request"
             401 -> "Unauthorized"
@@ -2056,12 +2105,13 @@ class DexAgentService : Service() {
         }
         socket.getOutputStream().apply {
             write(
-                "HTTP/1.1 $status $reason\r\n".toByteArray() +
-                    "Content-Type: application/json\r\n".toByteArray() +
-                    "Content-Length: ${bytes.size}\r\n".toByteArray() +
+                "HTTP/1.1 ${response.status} $reason\r\n".toByteArray() +
+                    "Content-Type: ${response.contentType}\r\n".toByteArray() +
+                    "Content-Length: ${response.body.size}\r\n".toByteArray() +
+                    "Cache-Control: max-age=86400\r\n".toByteArray() +
                     "Connection: close\r\n\r\n".toByteArray(),
             )
-            write(bytes)
+            write(response.body)
             flush()
         }
     }
@@ -2100,9 +2150,6 @@ class DexAgentService : Service() {
         private const val PORT = 8792
         private const val MAX_BODY_BYTES = 64 * 1024
         private const val MAX_REJECTED_BODY_BYTES = 1024 * 1024
-        private const val MAX_SHELL_OUTPUT_BYTES = 256 * 1024
-        private const val ROOT_COMMAND_TIMEOUT_SECONDS = 5L
-        private const val ROOT_APPROVAL_TIMEOUT_SECONDS = 60L
         private const val ROOT_CACHE_MS = 30_000L
         private const val TASK_EVENT_DEBOUNCE_MS = 120L
         // Give launcher animations and task creation a little more breathing

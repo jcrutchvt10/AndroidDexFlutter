@@ -24,8 +24,12 @@
 #include <vector>
 
 #include "json.h"
+#include "control_api.h"
 #include "host_workspace_state.h"
+#include "icon_cache.h"
 #include "opik_telemetry.h"
+#include "settings.h"
+#include "shortcuts.h"
 
 namespace {
 constexpr UINT WM_REFRESH_DEVICE = WM_APP + 1;
@@ -88,6 +92,7 @@ constexpr UINT_PTR EXPORT_TIMER = 2003;
 constexpr UINT_PTR RECONNECT_TIMER = 2004;
 constexpr int DYNAMIC_ID_FIRST = 4000;
 constexpr int AGENT_PORT = 8792;
+constexpr int CONTROL_PORT = 8791;
 constexpr int TARGET_SHORT_SIDE_DP = 700;
 
 // All mutable application state in one place.  Grouped by lifetime and access
@@ -129,6 +134,7 @@ struct RewriteDEXController {
     // bind the visible session to one of those old IDs.
     std::vector<int> launchBaselineVirtualDisplays;
     std::unique_ptr<HostWorkspaceState> hostWorkspace;
+    std::unique_ptr<HostIconCache> iconCache;
     UINT uiDpi = 96;
     // Throttle edge-resize move posts so the agent is not flooded.
     ULONGLONG lastDesktopMoveNotifyMs = 0;
@@ -168,6 +174,7 @@ struct RewriteDEXController {
     std::unordered_map<int, DynamicAction> dynamicActions;
 };
 RewriteDEXController g_ctrl;
+ShortcutMap g_shortcuts;
 
 // Winsock is initialized once at startup and torn down at exit.  Avoids the
 // per-request WSAStartup/WSACleanup overhead.
@@ -176,9 +183,42 @@ bool ensureWinsock() {
     return initialized;
 }
 
+// Fire-and-forget background task. Win32 CreateThread is used instead of
+// std::thread(...).detach() so the source compiles under both MSVC and mingw
+// win32-threads toolchains (which do not ship std::thread).
+struct DetachedThreadContext {
+    std::function<void()> fn;
+};
+
+DWORD WINAPI detachedThreadProc(LPVOID parameter) {
+    auto* context = static_cast<DetachedThreadContext*>(parameter);
+    context->fn();
+    delete context;
+    return 0;
+}
+
+void runDetached(std::function<void()> fn) {
+    auto* context = new DetachedThreadContext{std::move(fn)};
+    const HANDLE thread = CreateThread(nullptr, 0, detachedThreadProc, context, 0, nullptr);
+    if (!thread) delete context;
+    else CloseHandle(thread);
+}
+
 std::filesystem::path moduleDirectory();
+// Forward-declared for buildControlStatusJson; the definition carries the
+// default arguments (body = {}, timeoutMs = 5000).
+std::string agentRequest(const char* method, const char* path, const std::string& body, DWORD timeoutMs);
+
 std::filesystem::path settingsPath() {
     return moduleDirectory() / L"rewritedex.ini";
+}
+
+std::filesystem::path settingsJsonPath() {
+    return moduleDirectory() / L"rewritedex-settings.json";
+}
+
+std::filesystem::path shortcutsJsonPath() {
+    return moduleDirectory() / L"rewritedex-shortcuts.json";
 }
 
 int scaleForDpi(int value, UINT dpi) {
@@ -198,6 +238,15 @@ std::wstring utf8ToWide(const std::string& value) {
     return result;
 }
 
+std::string utf8FromWide(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), size, nullptr, nullptr);
+    return result;
+}
+
 std::filesystem::path knownFolder(REFKNOWNFOLDERID id, const wchar_t* fallback) {
     PWSTR value = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_CREATE, nullptr, &value))) {
@@ -208,19 +257,59 @@ std::filesystem::path knownFolder(REFKNOWNFOLDERID id, const wchar_t* fallback) 
     return std::filesystem::path(fallback);
 }
 
-void saveSetting(const wchar_t* key, int value) {
-    WritePrivateProfileStringW(L"RewriteDEX", key, std::to_wstring(value).c_str(), settingsPath().c_str());
+void saveSetting(const wchar_t* /*key*/, int /*value*/) {
+    // All settings are persisted through the typed HostSettings JSON schema.
+    // The caller has already mutated g_ctrl before saving, so snapshot every
+    // field here to keep call sites unchanged during migration.
+    HostSettings settings;
+    settings.qualityProfile = g_ctrl.qualityProfile;
+    settings.shortcutPreset = g_ctrl.shortcutPreset;
+    settings.monitorIndex = g_ctrl.monitorIndex;
+    settings.allMonitors = g_ctrl.allMonitors;
+    settings.preferPhysicalDisplay = g_ctrl.preferPhysicalDisplay;
+    settings.windowsNotifications = g_ctrl.windowsNotifications;
+    settings.audioEnabled = g_ctrl.audioEnabled;
+    settings.save(settingsJsonPath());
 }
 
 void loadSettings() {
-    const auto path = settingsPath();
-    g_ctrl.qualityProfile = GetPrivateProfileIntW(L"RewriteDEX", L"Quality", 1, path.c_str());
-    g_ctrl.shortcutPreset = GetPrivateProfileIntW(L"RewriteDEX", L"Shortcuts", 0, path.c_str());
-    g_ctrl.monitorIndex = GetPrivateProfileIntW(L"RewriteDEX", L"Monitor", 0, path.c_str());
-    g_ctrl.allMonitors = GetPrivateProfileIntW(L"RewriteDEX", L"AllMonitors", 0, path.c_str()) != 0;
-    g_ctrl.preferPhysicalDisplay = GetPrivateProfileIntW(L"RewriteDEX", L"PhysicalHandoff", 1, path.c_str()) != 0;
-    g_ctrl.windowsNotifications = GetPrivateProfileIntW(L"RewriteDEX", L"WindowsNotifications", 1, path.c_str()) != 0;
-    g_ctrl.audioEnabled = GetPrivateProfileIntW(L"RewriteDEX", L"AudioEnabled", 0, path.c_str()) != 0;
+    HostSettings settings;
+    settings.load(settingsJsonPath(), settingsPath());
+    g_ctrl.qualityProfile = settings.qualityProfile;
+    g_ctrl.shortcutPreset = settings.shortcutPreset;
+    g_ctrl.monitorIndex = settings.monitorIndex;
+    g_ctrl.allMonitors = settings.allMonitors;
+    g_ctrl.preferPhysicalDisplay = settings.preferPhysicalDisplay;
+    g_ctrl.windowsNotifications = settings.windowsNotifications;
+    g_ctrl.audioEnabled = settings.audioEnabled;
+}
+
+// JSON payload for GET /control/status consumed by the visual shell.
+std::string buildControlStatusJson() {
+    std::string result = std::string("{")
+        + "\"ok\":true,"
+        + "\"serial\":" + json::quote(utf8FromWide(g_ctrl.serial)) + ","
+        + "\"connected\":" + (g_ctrl.serial.empty() ? "false" : "true") + ","
+        + "\"desktopRunning\":" + (g_ctrl.scrcpyProcess ? "true" : "false") + ","
+        + "\"monitorIndex\":" + std::to_string(g_ctrl.monitorIndex) + ","
+        + "\"allMonitors\":" + (g_ctrl.allMonitors ? "true" : "false") + ","
+        + "\"qualityProfile\":" + std::to_string(g_ctrl.qualityProfile) + ","
+        + "\"shortcutPreset\":" + std::to_string(g_ctrl.shortcutPreset) + ","
+        + "\"windowsNotifications\":" + (g_ctrl.windowsNotifications ? "true" : "false") + ","
+        + "\"audioEnabled\":" + (g_ctrl.audioEnabled ? "true" : "false") + ","
+        + "\"status\":" + json::quote(utf8FromWide(g_ctrl.status));
+    const std::string agent = agentRequest("GET", "/status", {}, 2000);
+    try {
+        const json::Value parsed = json::parse(agent);
+        if (parsed.is_object()) {
+            result += ",\"agent\":" + agent + "}";
+            return result;
+        }
+    } catch (...) {
+        // Agent unreachable; omit the agent block.
+    }
+    result += ",\"agent\":{}}";
+    return result;
 }
 
 std::string createSessionToken() {
@@ -546,18 +635,10 @@ LRESULT CALLBACK keyboardHookProc(int code, WPARAM message, LPARAM data) {
         const bool shortcutDown = g_ctrl.shortcutPreset == 0 ? windowsChord
             : g_ctrl.shortcutPreset == 1 ? ctrlAltChord : false;
         if (shortcutDown && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
-            int command = 0;
-            if (event->vkCode == VK_LEFT) command = ID_SNAP_LEFT;
-            if (event->vkCode == VK_RIGHT) command = ID_SNAP_RIGHT;
-            if (event->vkCode == VK_UP) command = ID_MAXIMIZE_TASK;
-            if (event->vkCode == VK_DOWN) command = ID_WINDOW_RESTORE;
-            // Win+= / Win+- grow/shrink freeform window (OEM keys for + and -).
-            if (event->vkCode == VK_OEM_PLUS || event->vkCode == VK_ADD) command = ID_WINDOW_LARGER;
-            if (event->vkCode == VK_OEM_MINUS || event->vkCode == VK_SUBTRACT) command = ID_WINDOW_SMALLER;
-            // Win+W / Win+Q: close the focused freeform app on the Pixel desktop.
-            if (event->vkCode == 'W' || event->vkCode == 'Q') command = ID_CLOSE_FOCUSED_APP;
+            // Data-driven chord->command table (rewritedex-shortcuts.json).
+            const int command = g_shortcuts.commandFor(static_cast<int>(event->vkCode));
             if (command) {
-                PostMessageW(g_ctrl.window, WM_COMMAND, command, 0);
+                PostMessageW(g_ctrl.window, WM_COMMAND, static_cast<WPARAM>(command), 0);
                 return 1;
             }
         }
@@ -619,9 +700,9 @@ void notifyDesktopInputAsync(
         agentRequest("POST", "/desktop/input", body, 500);
         return;
     }
-    std::thread([body]() {
+    runDetached([body]() {
         agentRequest("POST", "/desktop/input", body, 250);
-    }).detach();
+    });
 }
 
 // Low-level mouse hooks must stay bounded. Down markers are the one deliberate
@@ -1454,6 +1535,13 @@ void appendWindowsLauncherMenu(HMENU parent) {
         }
         if (recentCount) AppendMenuW(parent, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent on Windows");
         else DestroyMenu(recent);
+
+        // Warm the host icon cache for the apps the shell launcher shows most
+        // prominently so grids render instantly once the visual shell lands.
+        if (g_ctrl.iconCache) {
+            for (const auto& packageName : g_ctrl.hostWorkspace->pinnedApps()) g_ctrl.iconCache->ensureIcon(packageName);
+            for (const auto& packageName : g_ctrl.hostWorkspace->recentApps()) g_ctrl.iconCache->ensureIcon(packageName);
+        }
     }
 
     HMENU allApps = CreatePopupMenu();
@@ -1673,7 +1761,7 @@ void pollHostEvents() {
     bool expected = false;
     if (!g_ctrl.hostEventPollInFlight.compare_exchange_strong(expected, true)) return;
     const long long cursor = g_ctrl.hostEventCursor.load();
-    std::thread([cursor]() {
+    runDetached([cursor]() {
         bool displayTopologyChanged = false;
         try {
             const std::string path = "/api/v1/events?cursor=" + std::to_string(cursor);
@@ -1697,7 +1785,7 @@ void pollHostEvents() {
         }
         g_ctrl.hostEventPollInFlight.store(false);
         if (displayTopologyChanged && g_ctrl.window) PostMessageW(g_ctrl.window, WM_HOST_EVENT, 0, 0);
-    }).detach();
+    });
 }
 
 void pullExports() {
@@ -2418,6 +2506,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCommand) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     loadSettings();
+    g_shortcuts.load(shortcutsJsonPath());
     g_ctrl.startDesktop = commandLine && wcsstr(commandLine, L"--start") != nullptr;
     const auto placement = chooseControllerPlacement();
     g_ctrl.uiDpi = placement.dpi;
@@ -2446,6 +2535,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
     g_ctrl.hostWorkspace = std::make_unique<HostWorkspaceState>(
         knownFolder(FOLDERID_LocalAppData, L".") / L"RewriteDEX" / L"host-workspace.json");
     g_ctrl.hostWorkspace->load();
+    g_ctrl.iconCache = std::make_unique<HostIconCache>(
+        knownFolder(FOLDERID_LocalAppData, L".") / L"RewriteDEX" / L"icons",
+        [](const std::string& packageName) {
+            return agentRequest("GET", ("/api/v1/app-icons/" + packageName).c_str(), {}, 5000);
+        });
 
     WNDCLASSW windowClass{};
     windowClass.hInstance = instance;
@@ -2471,11 +2565,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int showCo
         windowX, windowY, windowWidth, windowHeight, nullptr, nullptr, instance, nullptr);
     ShowWindow(g_ctrl.window, showCommand);
 
+    // Local control API for the visual shell. Pure client separation keeps UI
+    // churn from ever stalling the desktop stream.
+    control::startServer(CONTROL_PORT, control::Callbacks{
+        /*statusJson=*/buildControlStatusJson,
+        /*command=*/[](int commandId) {
+            if (!g_ctrl.window) return false;
+            return PostMessageW(g_ctrl.window, WM_COMMAND, static_cast<WPARAM>(commandId), 0) != 0;
+        },
+        /*agentRequest=*/[](const std::string& method, const std::string& path, const std::string& body) {
+            return agentRequest(method.c_str(), path.c_str(), body, 8000);
+        },
+    });
+
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    control::stopServer();
     ReleaseMutex(g_ctrl.singleInstance);
     CloseHandle(g_ctrl.singleInstance);
     return static_cast<int>(message.wParam);
