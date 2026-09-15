@@ -1,0 +1,53 @@
+name: androiddex_host
+description: "Android-Dex compatible Flutter Windows host for the Android-Dex APK/JAR backend."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  provider: ^6.1.2
+
+  async: ^2.11.0
+  collection: ^1.18.0
+  convert: ^3.1.1
+  http: ^1.2.2
+  http_parser: ^4.0.2
+  intl: ^0.19.0
+  json_annotation: ^4.9.0
+  meta: ^1.12.0
+  path: ^1.9.0
+  pool: ^1.5.0
+  shelf: ^1.4.1
+  shelf_web_socket: ^2.0.0
+  web_socket_channel: ^2.4.0
+  win32: ^5.5.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  json_serializable: ^6.8.0
+  build_runner: ^2.4.0
+  mocktail: ^1.0.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - host_bundle/data/flutter_assets/assets/
+    - host_bundle/data/flutter_assets/assets/Android/
+    - host_bundle/data/flutter_assets/assets/dex_apps/
+    - host_bundle/data/flutter_assets/assets/icon/
+  fonts:
+    - family: SamsungSharpSans
+      fonts:
+        - asset: host_bundle/data/flutter_assets/assets/fonts/samsungsharpsans.otf
+        - asset: host_bundle/data/flutter_assets/assets/fonts/samsungsharpsans-medium.otf
+          weight: 500
+        - asset: host_bundle/data/flutter_assets/assets/fonts/samsungsharpsans-bold.otf
+          weight: 700

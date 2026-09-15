@@ -4,6 +4,11 @@ build-msvc/
 build-msvc-ninja/
 build-mingw-qt/
 out/
+.dart_tool/
+
+# Local Flutter SDK and Visual Studio bootstrap downloads. These are machine
+# caches used to build the Windows host and are intentionally not published.
+/tools/
 
 # IDE
 *.obj
@@ -66,6 +71,10 @@ AndroidDEX-*.zip
 *.7z
 *.msi
 *.nupkg
+
+# The Flutter host ships this runtime beside the executable. Re-include its
+# sidecar binaries even though generic binary patterns above remain ignored.
+!host_bundle/**
 
 # OS
 Thumbs.db

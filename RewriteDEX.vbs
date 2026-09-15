@@ -1,4 +1,4 @@
-' Console-free launcher → launch.ps1 → rewritedex-native\build\rewritedex-native.exe
+' Console-free launcher → launch.ps1 → the Flutter Windows host
 Option Explicit
 Dim sh, fso, root, script
 Set sh = CreateObject("WScript.Shell")
