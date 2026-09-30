@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 
 import '../core/app_paths.dart';
 import '../core/dev_log.dart';
+import 'shortcut_bindings.dart';
 
 /// Persistent host preferences.
 ///
@@ -42,6 +43,8 @@ class SettingsStore extends ChangeNotifier {
   int _wallpaper = _defaultWallpaper;
   String _lastDevice = '';
   bool _shortcutsEnabled = true;
+  Map<String, String> _shortcutChords = Map.of(ShortcutBindings.defaults);
+  bool _onboardingComplete = false;
   bool _loaded = false;
   double _videoBitrateMbps = 8.0;
   int _videoFps = 60;
@@ -55,10 +58,15 @@ class SettingsStore extends ChangeNotifier {
   };
 
   Map<String, Map<String, num>> _windowStates = {};
+  int _selectedWorkspace = 0;
 
   int get wallpaper => _wallpaper;
   String get lastDevice => _lastDevice;
+  int get selectedWorkspace => _selectedWorkspace;
   bool get shortcutsEnabled => _shortcutsEnabled;
+  Map<String, String> get shortcutChords => Map.unmodifiable(_shortcutChords);
+  String shortcutFor(String action) => _shortcutChords[action]!;
+  bool get onboardingComplete => _onboardingComplete;
   bool get loaded => _loaded;
   double get videoBitrateMbps => _videoBitrateMbps;
   int get videoFps => _videoFps;
@@ -87,6 +95,13 @@ class SettingsStore extends ChangeNotifier {
     _scheduleSave();
   }
 
+  void setSelectedWorkspace(int index) {
+    if (index < 0 || index > 3 || index == _selectedWorkspace) return;
+    _selectedWorkspace = index;
+    notifyListeners();
+    _scheduleSave();
+  }
+
   File get _file => File(p.join(AppPaths.userDataDir.path, _fileName));
 
   /// Reads preferences from disk. Missing or corrupt files fall back to
@@ -101,7 +116,22 @@ class SettingsStore extends ChangeNotifier {
       if (json is! Map) return;
       _wallpaper = _readInt(json['wallpaper']) ?? _defaultWallpaper;
       _lastDevice = json['last_device']?.toString() ?? '';
+      _selectedWorkspace = (_readInt(json['selected_workspace']) ?? 0).clamp(0, 3);
       _shortcutsEnabled = json['shortcuts_enabled'] as bool? ?? true;
+      final storedChords = json['shortcut_chords'];
+      if (storedChords is Map) {
+        final candidate = Map<String, String>.of(ShortcutBindings.defaults);
+        for (final action in candidate.keys) {
+          final chord = storedChords[action];
+          if (chord is String && ShortcutBindings.keys.containsKey(chord)) {
+            candidate[action] = chord;
+          }
+        }
+        if (candidate.values.toSet().length == candidate.length) {
+          _shortcutChords = candidate;
+        }
+      }
+      _onboardingComplete = json['onboarding_complete'] == true;
       _videoBitrateMbps =
           ((json['video_bitrate_mbps'] as num?)?.toDouble() ?? 8.0).clamp(
             minBitrateMbps,
@@ -151,6 +181,29 @@ class SettingsStore extends ChangeNotifier {
   Future<void> setShortcutsEnabled(bool value) async {
     if (value == _shortcutsEnabled) return;
     _shortcutsEnabled = value;
+    notifyListeners();
+    await _save();
+  }
+
+  Future<void> completeOnboarding() async {
+    if (_onboardingComplete) return;
+    _onboardingComplete = true;
+    notifyListeners();
+    await _save();
+  }
+
+  Future<void> setShortcut(String action, String chord) async {
+    if (!_shortcutChords.containsKey(action) ||
+        !ShortcutBindings.keys.containsKey(chord) ||
+        _shortcutChords.entries.any((entry) => entry.key != action && entry.value == chord) ||
+        _shortcutChords[action] == chord) return;
+    _shortcutChords[action] = chord;
+    notifyListeners();
+    await _save();
+  }
+
+  Future<void> resetShortcuts() async {
+    _shortcutChords = Map.of(ShortcutBindings.defaults);
     notifyListeners();
     await _save();
   }
@@ -235,7 +288,10 @@ class SettingsStore extends ChangeNotifier {
       final payload = const JsonEncoder.withIndent('  ').convert({
         'wallpaper': _wallpaper,
         'last_device': _lastDevice,
+        'selected_workspace': _selectedWorkspace,
         'shortcuts_enabled': _shortcutsEnabled,
+        'shortcut_chords': _shortcutChords,
+        'onboarding_complete': _onboardingComplete,
         'video_bitrate_mbps': _videoBitrateMbps,
         'video_fps': _videoFps,
         'video_codec': _videoCodec,

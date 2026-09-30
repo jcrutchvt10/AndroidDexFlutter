@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:androiddex_host/home/home_screen.dart';
 import 'package:androiddex_host/boot/boot_screen.dart';
+import 'package:androiddex_host/boot/onboarding_screen.dart';
 import 'package:androiddex_host/core/android_core.dart';
 import 'package:androiddex_host/core/app_paths.dart';
 import 'package:androiddex_host/core/dev_log.dart';
@@ -56,6 +57,7 @@ class AppRoot extends StatefulWidget {
 class _AppRootState extends State<AppRoot> {
   late final AndroidCore _core;
   bool _bootComplete = false;
+  bool _guideDismissed = false;
 
   @override
   void initState() {
@@ -91,6 +93,12 @@ class _AppRootState extends State<AppRoot> {
   Widget build(BuildContext context) {
     if (!_bootComplete) {
       return const _InitializingRoot();
+    }
+    if (!_core.settings.onboardingComplete && !_guideDismissed) {
+      return OnboardingScreen(
+        core: _core,
+        onDone: () => setState(() => _guideDismissed = true),
+      );
     }
 
     return ListenableBuilder(

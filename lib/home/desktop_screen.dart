@@ -14,6 +14,7 @@ import '../home/game_mode_overlay.dart';
 import '../home/device_control_panel.dart';
 import '../services/icon_service.dart';
 import '../services/native_desktop_windows.dart';
+import '../services/shortcut_bindings.dart';
 import '../services/window_manager.dart';
 import '../services/window_thumbnail_service.dart';
 import 'device_manager_dialog.dart';
@@ -61,8 +62,15 @@ class _DesktopScreenState extends State<DesktopScreen> {
   bool _previewOpen = false;
   Timer? _persistTimer;
 
-  int _workspaceFor(String packageName) =>
-      _windowWorkspaces.putIfAbsent(packageName, () => _selectedWorkspace);
+  int _workspaceFor(String packageName) => _windowWorkspaces.putIfAbsent(
+    packageName,
+    () {
+      final saved = core.settings.windowStateFor(packageName)?['workspace']?.toInt();
+      return saved != null && saved >= 0 && saved < _workspaceNames.length
+          ? saved
+          : _selectedWorkspace;
+    },
+  );
 
   String get _activePackage {
     final focused = core.windows.focusedPackage;
@@ -84,6 +92,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
       await core.settings.load();
       await _gameProfileStore.load();
       if (!mounted) return;
+      setState(() => _selectedWorkspace = core.settings.selectedWorkspace);
       if (core.apkConnectedValue) core.refreshApps();
       _focusNode.requestFocus();
       _toastBridge = NotificationToastBridge(core);
@@ -109,6 +118,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
           'width': w.extent.width,
           'height': w.extent.height,
           'snap': w.snap.index,
+          'workspace': _workspaceFor(w.packageName),
         });
       }
     });
@@ -189,6 +199,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
       panel = null;
       if (core.windows.isOpen(app.packageName)) {
         _selectedWorkspace = _workspaceFor(app.packageName);
+        core.settings.setSelectedWorkspace(_selectedWorkspace);
       }
     });
     core.launchApp(app);
@@ -225,6 +236,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
   void _switchWorkspace(int index) {
     if (index < 0 || index >= _workspaceNames.length || index == _selectedWorkspace) return;
     setState(() => _selectedWorkspace = index);
+    core.settings.setSelectedWorkspace(index);
   }
 
   // --- Shortcuts ---------------------------------------------------------
@@ -253,19 +265,20 @@ class _DesktopScreenState extends State<DesktopScreen> {
     if (!core.settings.shortcutsEnabled) return KeyEventResult.ignored;
 
     if (key == LogicalKeyboardKey.f11 ||
-        (ctrl && key == LogicalKeyboardKey.keyF)) {
+        ShortcutBindings.matches(core.settings.shortcutFor('fullscreen'), key,
+          control: ctrl, alt: alt, shift: shift)) {
       _toggleFullscreen(!fullscreen);
       return KeyEventResult.handled;
     }
 
-    // Ctrl+/ — discoverability overlay listing the active chords.
-    if (ctrl && key == LogicalKeyboardKey.slash) {
+    if (ShortcutBindings.matches(core.settings.shortcutFor('help'), key,
+        control: ctrl, alt: alt, shift: shift)) {
       toggle('Shortcuts');
       return KeyEventResult.handled;
     }
 
-    // Ctrl+G — toggle gaming mode overlay.
-    if (ctrl && key == LogicalKeyboardKey.keyG) {
+    if (ShortcutBindings.matches(core.settings.shortcutFor('game_mode'), key,
+        control: ctrl, alt: alt, shift: shift)) {
       setState(() => gameMode = !gameMode);
       return KeyEventResult.handled;
     }
@@ -733,9 +746,13 @@ class _DesktopScreenState extends State<DesktopScreen> {
                               PopupMenuButton<int>(
                                 tooltip: 'Move ${managed.window.app.name} to workspace',
                                 icon: const Icon(Icons.more_vert, size: 16),
-                                onSelected: (index) => setState(() {
-                                  _windowWorkspaces[managed.packageName] = index;
-                                }),
+                                onSelected: (index) {
+                                  setState(() => _windowWorkspaces[managed.packageName] = index);
+                                  core.settings.setWindowState(managed.packageName, {
+                                    ...?core.settings.windowStateFor(managed.packageName),
+                                    'workspace': index,
+                                  });
+                                },
                                 itemBuilder: (context) => [
                                   for (var i = 0; i < _workspaceNames.length; i++)
                                     if (i != _selectedWorkspace)
@@ -769,12 +786,12 @@ class _DesktopScreenState extends State<DesktopScreen> {
                 ),
                 button(
                   fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                  fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen (Ctrl+F)',
+                  fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen (${core.settings.shortcutFor('fullscreen')})',
                   () => _toggleFullscreen(!fullscreen),
                 ),
                 button(
                   Icons.help_outline,
-                  'Keyboard shortcuts (Ctrl+/)',
+                  'Keyboard shortcuts (${core.settings.shortcutFor('help')})',
                   () => toggle('Shortcuts'),
                 ),
               ],
@@ -866,7 +883,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
       case 'Settings':
         return _settingsPanel();
       case 'Shortcuts':
-        return const ShortcutsHelp();
+        return ShortcutsHelp(settings: core.settings);
       default:
         return _devicePanel();
     }
@@ -964,6 +981,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
                 _selectedWorkspace = _workspaceFor(window.packageName);
                 panel = null;
               });
+              core.settings.setSelectedWorkspace(_selectedWorkspace);
               unawaited(NativeDesktopWindows.focus(window.processId));
             },
             child: Card(
@@ -1064,6 +1082,9 @@ class _DesktopScreenState extends State<DesktopScreen> {
   Widget _settingsPanel() => ListView(
     padding: const EdgeInsets.all(24),
     children: [
+      const _SettingsHeading(Icons.palette_outlined, 'Appearance',
+        'Personalize the host desktop.'),
+      const SizedBox(height: 16),
       const Text('Desktop wallpaper'),
       const SizedBox(height: 20),
       Wrap(
@@ -1096,6 +1117,8 @@ class _DesktopScreenState extends State<DesktopScreen> {
       ),
       const SizedBox(height: 24),
       const Divider(),
+      const _SettingsHeading(Icons.devices_outlined, 'Device & connection',
+        'Choose the Android device and manage its controls.'),
       ListTile(
         leading: const Icon(Icons.tablet_android),
         title: const Text('ADB Manager'),
@@ -1106,12 +1129,42 @@ class _DesktopScreenState extends State<DesktopScreen> {
           child: const Text('Open'),
         ),
       ),
+      DeviceControlPanel(core: core),
+      const SizedBox(height: 16),
+      const Divider(),
+      const _SettingsHeading(Icons.keyboard_outlined, 'Keyboard shortcuts',
+        'Customize host actions without overriding system or window shortcuts.'),
       SwitchListTile(
         value: core.settings.shortcutsEnabled,
         onChanged: (value) => core.settings.setShortcutsEnabled(value),
-        title: const Text('Keyboard shortcuts'),
-        subtitle: const Text('Press Ctrl+/ for the full list'),
+        title: const Text('Enable keyboard shortcuts'),
+        subtitle: Text('Press ${core.settings.shortcutFor('help')} for the full list'),
       ),
+      for (final action in ShortcutBindings.labels.keys)
+        ListTile(
+          title: Text(ShortcutBindings.labels[action]!),
+          trailing: DropdownButton<String>(
+            value: core.settings.shortcutFor(action),
+            onChanged: core.settings.shortcutsEnabled
+                ? (chord) {
+                    if (chord != null) core.settings.setShortcut(action, chord);
+                  }
+                : null,
+            items: [
+              for (final chord in ShortcutBindings.keys.keys)
+                DropdownMenuItem(
+                  value: chord,
+                  enabled: !core.settings.shortcutChords.entries.any(
+                    (entry) => entry.key != action && entry.value == chord,
+                  ),
+                  child: Text(chord),
+                ),
+            ],
+          ),
+        ),
+      const Divider(),
+      const _SettingsHeading(Icons.high_quality_outlined, 'Streaming & display',
+        'Changes apply to newly launched app windows.'),
       ListTile(
         leading: const Icon(Icons.speed),
         title: const Text('Video bitrate'),
@@ -1198,6 +1251,8 @@ class _DesktopScreenState extends State<DesktopScreen> {
       ),
       const SizedBox(height: 12),
       const Divider(),
+      const _SettingsHeading(Icons.games_outlined, 'Gaming mode',
+        'Map on-screen controls to the focused Android app.'),
       ListTile(
         leading: const Icon(Icons.games),
         title: const Text('Gaming mode'),
@@ -1216,13 +1271,24 @@ class _DesktopScreenState extends State<DesktopScreen> {
         'them, drag the bottom edge to resize, and use Ctrl+Shift with the '
         'arrow keys to snap them.',
       ),
-      const Divider(),
-      const Text('Device controls', style: TextStyle(fontSize: 14)),
-      const SizedBox(height: 8),
-      DeviceControlPanel(core: core),
     ],
   );
+}
 
+class _SettingsHeading extends StatelessWidget {
+  const _SettingsHeading(this.icon, this.title, this.description);
+
+  final IconData icon;
+  final String title;
+  final String description;
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    contentPadding: EdgeInsets.zero,
+    leading: Icon(icon, color: Theme.of(context).colorScheme.primary),
+    title: Text(title, style: Theme.of(context).textTheme.titleMedium),
+    subtitle: Text(description),
+  );
 }
 
 /// Gamepad tokens the JAR `input` sub-command understands.
