@@ -173,8 +173,12 @@ class WindowManager extends ChangeNotifier {
   void focus(String packageName) {
     final entry = forPackage(packageName);
     if (entry == null) return;
+    final wasMinimized = entry.minimized;
     entry.minimized = false;
-    if (identical(_windows.last, entry)) return;
+    if (identical(_windows.last, entry)) {
+      if (wasMinimized) notifyListeners();
+      return;
+    }
     _windows
       ..remove(entry)
       ..add(entry);

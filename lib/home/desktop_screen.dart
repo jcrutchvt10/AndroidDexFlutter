@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -12,6 +12,7 @@ import '../core/game_profile.dart';
 import '../core/protocol.dart';
 import '../home/game_mode_overlay.dart';
 import '../home/device_control_panel.dart';
+import '../services/icon_service.dart';
 import '../services/native_desktop_windows.dart';
 import '../services/window_manager.dart';
 import '../services/window_thumbnail_service.dart';
@@ -21,6 +22,8 @@ import 'notification_toast_overlay.dart';
 import 'media_panel.dart';
 import 'notification_panel.dart';
 import 'reconnecting_overlay.dart';
+import 'shortcuts_help.dart';
+import 'workspace_switcher.dart';
 
 const _assets = 'host_bundle/data/flutter_assets/assets';
 
@@ -51,9 +54,22 @@ class _DesktopScreenState extends State<DesktopScreen> {
   NotificationToastBridge? _toastBridge;
   bool? _lastGlobalSurfaceVisibility;
   final Set<String> _panelCoveredPackages = <String>{};
+  final Map<String, int> _windowWorkspaces = {};
+  final Map<String, Future<Uint8List?>> _iconRequests = {};
+  static const _workspaceNames = ['Desktop', 'Work', 'Media', 'Personal'];
+  int _selectedWorkspace = 0;
+  bool _previewOpen = false;
   Timer? _persistTimer;
 
-  String get _activePackage => core.windows.focusedPackage ?? '';
+  int _workspaceFor(String packageName) =>
+      _windowWorkspaces.putIfAbsent(packageName, () => _selectedWorkspace);
+
+  String get _activePackage {
+    final focused = core.windows.focusedPackage;
+    return focused != null && _workspaceFor(focused) == _selectedWorkspace
+        ? focused
+        : '';
+  }
 
   AndroidCore get core => widget.core;
   int get wallpaper => core.settings.wallpaper;
@@ -78,6 +94,11 @@ class _DesktopScreenState extends State<DesktopScreen> {
   /// Persists window geometry, coalescing bursts (a drag notifies on every
   /// tick) into one delayed write.
   void _onWindowsChanged() {
+    final open = {for (final w in core.windows.ordered) w.packageName};
+    _windowWorkspaces.removeWhere((packageName, _) => !open.contains(packageName));
+    for (final packageName in open) {
+      _workspaceFor(packageName);
+    }
     _persistTimer?.cancel();
     _persistTimer = Timer(const Duration(milliseconds: 500), () {
       if (!mounted) return;
@@ -121,7 +142,15 @@ class _DesktopScreenState extends State<DesktopScreen> {
   void _syncNativeSurfaceVisibility(bool visible) {
     if (_lastGlobalSurfaceVisibility == visible) return;
     _lastGlobalSurfaceVisibility = visible;
-    unawaited(NativeDesktopWindows.setVisible(visible));
+    unawaited(NativeDesktopWindows.setVisible(visible).then((_) {
+      if (!visible) return;
+      for (final managed in core.windows.ordered) {
+        if (_workspaceFor(managed.packageName) != _selectedWorkspace ||
+            _panelCoveredPackages.contains(managed.packageName)) {
+          NativeDesktopWindows.setWindowVisible(managed.window.processId, false);
+        }
+      }
+    }));
   }
 
   void toggle(String value) =>
@@ -156,33 +185,46 @@ class _DesktopScreenState extends State<DesktopScreen> {
   );
 
   void launch(AndroidAppInfo app) {
-    setState(() => panel = null);
+    setState(() {
+      panel = null;
+      if (core.windows.isOpen(app.packageName)) {
+        _selectedWorkspace = _workspaceFor(app.packageName);
+      }
+    });
     core.launchApp(app);
   }
 
-  /// Only windows that actually intersect the open panel need to hide their
-  /// native surfaces — hiding everything made the whole desktop blink
-  /// whenever any panel was opened.
-  void _updateCoveredSurfaces(Rect panelRect, Size desktop) {
+  /// Keep native surfaces in sync with the current host workspace and panel.
+  void _updateCoveredSurfaces(Rect? panelRect) {
     final covered = <String>{};
     for (final managed in core.windows.ordered) {
-      if (managed.minimized) continue;
       final windowRect = managed.origin & managed.extent;
-      if (windowRect.overlaps(panelRect)) covered.add(managed.packageName);
+      if (_previewOpen ||
+          _workspaceFor(managed.packageName) != _selectedWorkspace ||
+          managed.minimized ||
+          (panelRect != null && windowRect.overlaps(panelRect))) {
+        covered.add(managed.packageName);
+      }
     }
-    final unchanged =
-        covered.length == _panelCoveredPackages.length &&
-        covered.containsAll(_panelCoveredPackages);
-    if (unchanged) return;
+    final previous = Set<String>.of(_panelCoveredPackages);
     _panelCoveredPackages
       ..clear()
       ..addAll(covered);
     for (final managed in core.windows.ordered) {
-      NativeDesktopWindows.setWindowVisible(
-        managed.window.processId,
-        !covered.contains(managed.packageName),
-      );
+      final wasCovered = previous.remove(managed.packageName);
+      final isCovered = covered.contains(managed.packageName);
+      if (wasCovered != isCovered) {
+        NativeDesktopWindows.setWindowVisible(
+          managed.window.processId,
+          surfacesVisible && !isCovered,
+        );
+      }
     }
+  }
+
+  void _switchWorkspace(int index) {
+    if (index < 0 || index >= _workspaceNames.length || index == _selectedWorkspace) return;
+    setState(() => _selectedWorkspace = index);
   }
 
   // --- Shortcuts ---------------------------------------------------------
@@ -207,6 +249,8 @@ class _DesktopScreenState extends State<DesktopScreen> {
       }
       return KeyEventResult.ignored;
     }
+
+    if (!core.settings.shortcutsEnabled) return KeyEventResult.ignored;
 
     if (key == LogicalKeyboardKey.f11 ||
         (ctrl && key == LogicalKeyboardKey.keyF)) {
@@ -251,15 +295,35 @@ class _DesktopScreenState extends State<DesktopScreen> {
       return KeyEventResult.handled;
     }
 
-    // Ctrl+Tab — cycle the window z-order. (Bare Alt+Tab is captured by the
-    // OS before the app sees it, so it is intentionally not advertised.)
+    // Bare Alt+Tab belongs to the OS, so use Ctrl+Tab instead.
     if (ctrl && key == LogicalKeyboardKey.tab) {
-      core.windows.cycleFocus();
+      final visible = core.windows.ordered
+          .where((w) => _workspaceFor(w.packageName) == _selectedWorkspace && !w.minimized)
+          .toList();
+      if (visible.length > 1) {
+        final next = visible[visible.length - 2];
+        core.windows.focus(next.packageName);
+        unawaited(NativeDesktopWindows.focus(next.window.processId));
+      }
       return KeyEventResult.handled;
     }
 
+    if (ctrl && !alt && !shift) {
+      final index = const [
+        LogicalKeyboardKey.digit1,
+        LogicalKeyboardKey.digit2,
+        LogicalKeyboardKey.digit3,
+        LogicalKeyboardKey.digit4,
+      ].indexOf(key);
+      if (index >= 0) {
+        _switchWorkspace(index);
+        return KeyEventResult.handled;
+      }
+    }
+
     final focused = core.windows.focusedPackage;
-    if (ctrl && !alt && focused != null) {
+    if (ctrl && !alt && focused != null &&
+        _workspaceFor(focused) == _selectedWorkspace) {
       switch (key) {
         case LogicalKeyboardKey.keyW:
           final managed = core.windows.forPackage(focused);
@@ -296,6 +360,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([
       core,
+      core.settings,
       core.notifications,
       core.media,
       core.windows,
@@ -315,22 +380,11 @@ class _DesktopScreenState extends State<DesktopScreen> {
               final desktop = Size(bounds.maxWidth, bounds.maxHeight);
               final compact = desktop.width < 800;
               WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted || core.desktopWindows.isEmpty) return;
-                if (panel == null) {
-                  if (_panelCoveredPackages.isNotEmpty) {
-                    // Re-show everything hidden by a panel that just closed.
-                    _panelCoveredPackages.clear();
-                    for (final managed in core.windows.ordered) {
-                      NativeDesktopWindows.setWindowVisible(
-                        managed.window.processId,
-                        true,
-                      );
-                    }
-                  }
-                  _syncNativeSurfaceVisibility(surfacesVisible);
-                } else {
-                  _updateCoveredSurfaces(_panelRect(desktop, compact), desktop);
-                }
+                if (!mounted) return;
+                _updateCoveredSurfaces(
+                  panel == null ? null : _panelRect(desktop, compact),
+                );
+                _syncNativeSurfaceVisibility(surfacesVisible);
               });
               return Stack(
                 fit: StackFit.expand,
@@ -350,12 +404,13 @@ class _DesktopScreenState extends State<DesktopScreen> {
                   _desktopIcons(compact),
                   if (!fullscreen) _clock(),
                   for (final managed in core.windows.ordered)
-                    EmbeddedAppWindow(
-                      key: ValueKey(managed.packageName),
-                      core: core,
-                      managed: managed,
-                      desktop: desktop,
-                    ),
+                    if (_workspaceFor(managed.packageName) == _selectedWorkspace)
+                      EmbeddedAppWindow(
+                        key: ValueKey(managed.packageName),
+                        core: core,
+                        managed: managed,
+                        desktop: desktop,
+                      ),
                   if (core.launchError.isNotEmpty)
                     Positioned(
                       left: 24,
@@ -425,19 +480,22 @@ class _DesktopScreenState extends State<DesktopScreen> {
   );
 
   Widget appIcon(AndroidAppInfo app, {double size = 46}) {
-    try {
-      if (app.hasIcon) {
-        return Image.memory(
-          base64Decode(app.iconBase64),
-          width: size,
-          height: size,
-          errorBuilder: (_, _, _) => Icon(Icons.android, size: size),
-        );
-      }
-    } catch (_) {
-      // Fall through to the generic icon.
-    }
-    return Icon(Icons.android, size: size);
+    final key = '${core.devices.deviceId}:${app.packageName}:${app.iconBase64.hashCode}';
+    final request = _iconRequests.putIfAbsent(
+      key,
+      () => IconService.instance.iconFor(app, core.devices.deviceId),
+    );
+    return FutureBuilder<Uint8List?>(
+      future: request,
+      builder: (context, snapshot) => snapshot.data == null
+          ? Icon(Icons.android, size: size)
+          : Image.memory(
+              snapshot.data!,
+              width: size,
+              height: size,
+              errorBuilder: (_, _, _) => Icon(Icons.android, size: size),
+            ),
+    );
   }
 
   Widget tile(String name, Widget icon, VoidCallback action) => SizedBox(
@@ -608,138 +666,159 @@ class _DesktopScreenState extends State<DesktopScreen> {
   );
 
   Widget _taskbar(Size desktop, bool compact) => Positioned(
-    left: 12,
-    right: 12,
-    bottom: 10,
-    child: Row(
-      children: [
-        Glass(
-          child: Row(
-            children: [
-              button(
-                Icons.view_quilt_outlined,
-                'Recents',
-                () => toggle('Recents'),
-              ),
-              button(
-                Icons.home_outlined,
-                'Desktop',
-                () => setState(() => panel = null),
-              ),
-            ],
+      left: 12,
+      right: 12,
+      bottom: 10,
+      child: Row(
+        children: [
+          Glass(
+            child: Row(
+              children: [
+                button(
+                  Icons.view_quilt_outlined,
+                  'Recents',
+                  () => toggle('Recents'),
+                ),
+                button(
+                  Icons.home_outlined,
+                  'Desktop',
+                  () => setState(() => panel = null),
+                ),
+              ],
+            ),
           ),
-        ),
-        const SizedBox(width: 8),
-        // Running windows: clicking focuses, clicking the icon
-        // block again minimises.
-        if (core.windows.length > 0)
-          Flexible(
-            child: Glass(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (final managed in core.windows.ordered)
-                      TextButton.icon(
-                        onPressed: () {
-                          if (core.windows.focusedPackage ==
-                              managed.packageName) {
-                            core.windows.toggleMinimize(managed.packageName);
-                          } else {
-                            core.windows.focus(managed.packageName);
-                            unawaited(
-                              NativeDesktopWindows.focus(
-                                managed.window.processId,
+          const SizedBox(width: 8),
+          Glass(
+            child: WorkspaceSwitcher(
+              core: core,
+              names: _workspaceNames,
+              selected: _selectedWorkspace,
+              workspaceFor: _workspaceFor,
+              onSelected: _switchWorkspace,
+              onPreviewChanged: (open) {
+                if (mounted) setState(() => _previewOpen = open);
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Running windows: clicking focuses, clicking the icon
+          // block again minimises.
+          if (core.windows.ordered.any(
+            (w) => _workspaceFor(w.packageName) == _selectedWorkspace,
+          ))
+            Flexible(
+              child: Glass(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (final managed in core.windows.ordered)
+                        if (_workspaceFor(managed.packageName) == _selectedWorkspace)
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TextButton.icon(
+                                onPressed: () {
+                                  if (core.windows.focusedPackage == managed.packageName &&
+                                      !managed.minimized) {
+                                    core.windows.minimize(managed.packageName);
+                                  } else {
+                                    core.windows.focus(managed.packageName);
+                                    unawaited(NativeDesktopWindows.focus(managed.window.processId));
+                                  }
+                                },
+                                icon: Icon(managed.minimized ? Icons.minimize : Icons.crop_square, size: 15),
+                                label: Text(managed.window.app.name, style: const TextStyle(fontSize: 12)),
                               ),
-                            );
-                          }
-                        },
-                        icon: Icon(
-                          managed.minimized
-                              ? Icons.minimize
-                              : Icons.crop_square,
-                          size: 15,
-                        ),
-                        label: Text(
-                          managed.window.app.name,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                  ],
+                              PopupMenuButton<int>(
+                                tooltip: 'Move ${managed.window.app.name} to workspace',
+                                icon: const Icon(Icons.more_vert, size: 16),
+                                onSelected: (index) => setState(() {
+                                  _windowWorkspaces[managed.packageName] = index;
+                                }),
+                                itemBuilder: (context) => [
+                                  for (var i = 0; i < _workspaceNames.length; i++)
+                                    if (i != _selectedWorkspace)
+                                      PopupMenuItem(value: i, child: Text('Move to ${_workspaceNames[i]}')),
+                                ],
+                              ),
+                            ],
+                          ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        const Spacer(),
-        Glass(
-          child: Row(
-            children: [
-              button(Icons.apps, 'Apps', () => toggle('Apps')),
-              button(Icons.play_circle_outline, 'Media', () => toggle('Media')),
-              IconButton(
-                tooltip: 'Notifications',
-                onPressed: () => toggle('Notifications'),
-                icon: _badged(
-                  const Icon(
-                    Icons.notifications_outlined,
-                    color: Colors.white,
-                    size: 21,
+          const Spacer(),
+          Glass(
+            child: Row(
+              children: [
+                button(Icons.apps, 'Apps', () => toggle('Apps')),
+                button(Icons.play_circle_outline, 'Media', () => toggle('Media')),
+                IconButton(
+                  tooltip: 'Notifications',
+                  onPressed: () => toggle('Notifications'),
+                  icon: _badged(
+                    const Icon(
+                      Icons.notifications_outlined,
+                      color: Colors.white,
+                      size: 21,
+                    ),
+                    core.notifications.unreadCount,
                   ),
-                  core.notifications.unreadCount,
                 ),
-              ),
-              button(
-                fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen (Ctrl+F)',
-                () => _toggleFullscreen(!fullscreen),
-              ),
-              button(
-                Icons.help_outline,
-                'Keyboard shortcuts (Ctrl+/)',
-                () => toggle('Shortcuts'),
-              ),
-            ],
+                button(
+                  fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                  fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen (Ctrl+F)',
+                  () => _toggleFullscreen(!fullscreen),
+                ),
+                button(
+                  Icons.help_outline,
+                  'Keyboard shortcuts (Ctrl+/)',
+                  () => toggle('Shortcuts'),
+                ),
+              ],
+            ),
           ),
-        ),
-        const Spacer(),
-        Glass(
-          child: Row(
-            children: [
-              button(
-                core.wifi ? Icons.wifi : Icons.usb,
-                'Device',
-                () => toggle('Device'),
-              ),
-              if (!compact)
-                Text(
-                  core.batteryPercentage < 0
-                      ? '—'
-                      : '${core.batteryPercentage}%',
-                  style: const TextStyle(fontSize: 11),
+          const Spacer(),
+          Glass(
+            child: Row(
+              children: [
+                button(
+                  core.wifi ? Icons.wifi : Icons.usb,
+                  'Device',
+                  () => toggle('Device'),
                 ),
-              button(
-                Icons.settings_outlined,
-                'Settings',
-                () => toggle('Settings'),
-              ),
-              button(
-                Icons.games,
-                'Gaming',
-                () => setState(() => gameMode = !gameMode),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(10),
-                child: Text(
-                  DateFormat('h:mm a').format(DateTime.now()),
-                  style: const TextStyle(fontSize: 11),
+                if (!compact)
+                  Text(
+                    core.batteryPercentage < 0
+                        ? '—'
+                        : '${core.batteryPercentage}%',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                button(
+                  Icons.settings_outlined,
+                  'Settings',
+                  () => toggle('Settings'),
                 ),
-              ),
-            ],
+                button(
+                  Icons.games,
+                  'Gaming',
+                  () => setState(() => gameMode = !gameMode),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Text(
+                    DateFormat('h:mm a').format(DateTime.now()),
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
-    ),
-  );
+        ],
+      ),
+    );
 
   Widget _panelFrame(Size desktop, bool compact) => Positioned(
     left: compact ? 16 : desktop.width * .17,
@@ -787,7 +866,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
       case 'Settings':
         return _settingsPanel();
       case 'Shortcuts':
-        return _shortcutsPanel();
+        return const ShortcutsHelp();
       default:
         return _devicePanel();
     }
@@ -881,8 +960,11 @@ class _DesktopScreenState extends State<DesktopScreen> {
           return InkWell(
             onTap: () {
               core.windows.focus(window.packageName);
+              setState(() {
+                _selectedWorkspace = _workspaceFor(window.packageName);
+                panel = null;
+              });
               unawaited(NativeDesktopWindows.focus(window.processId));
-              setState(() => panel = null);
             },
             child: Card(
               color: Colors.white.withValues(alpha: 0.06),
@@ -1141,40 +1223,6 @@ class _DesktopScreenState extends State<DesktopScreen> {
     ],
   );
 
-  Widget _shortcutsPanel() => ListView(
-    padding: const EdgeInsets.all(24),
-    children: [
-      for (final entry in const <(String, String)>[
-        ('Ctrl + F / F11', 'Toggle fullscreen'),
-        ('Esc', 'Exit fullscreen or close a panel'),
-        ('Ctrl + W', 'Close the focused app window'),
-        ('Ctrl + M', 'Minimize the focused app window'),
-        ('Ctrl + Tab', 'Cycle the window z-order'),
-        ('Drag to top edge', 'Maximize a window by its title bar'),
-        ('Ctrl + Shift + Left / Right', 'Snap the focused window'),
-        ('Ctrl + Shift + Up / Down', 'Maximize / restore the focused window'),
-        ('Ctrl + Alt + Up / Down', 'Show / hide the Android surfaces'),
-        ('Ctrl + Alt + Left / Right', 'Open the device switcher'),
-        ('Ctrl + /', 'Show this shortcut list'),
-      ])
-        ListTile(
-          dense: true,
-          leading: const Icon(Icons.keyboard, size: 18),
-          title: Text(entry.$1),
-          subtitle: Text(entry.$2),
-        ),
-      const Divider(),
-      const ListTile(
-        dense: true,
-        leading: Icon(Icons.games, size: 18),
-        title: Text('Gaming Mode (Ctrl + G)'),
-        subtitle: Text(
-          'Toggles an on-screen D-pad, joystick, action buttons, '
-          'and tap-spot overlay for the focused app.',
-        ),
-      ),
-    ],
-  );
 }
 
 /// Gamepad tokens the JAR `input` sub-command understands.
