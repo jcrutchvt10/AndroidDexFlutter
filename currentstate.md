@@ -2,9 +2,48 @@
 
 ## End goal
 
+## September 20 robustness pass
+
+- **Dead controls fixed in the device panel.** Torch was sending
+  `wifi.get_details` (a read command — no torch wire command exists in the
+  v1.2 artifacts; the `flashlightOn/Off` strings are camera resources), so the
+  tile was removed. Brightness now uses a real `shell` `settings put system
+  screen_brightness` command with session state, and "copy clipboard from
+  device" performs the actual `clipboard.text` round-tr instead of showing a
+  fake success snackbar.
+- **`shell` JAR passthrough documented** (`docs/HOST_ARCHITECTURE.md`):
+  verified against the v1.2 JAR (3 literals + `Runtime.exec`); game-mode input
+  and panel shell commands are centralized on `DexProtocol.jarShell`.
+- **Robustness.** Every ADB invocation is bounded by `adbTimeout` (20 s); host
+  servers replace a stale active client instead of silently interleaving two
+  senders (and only the *active* socket fires disconnect callbacks);
+  `settings.json` writes are atomic (temp + rename) and debounced (400 ms);
+  handshake waits use completers with no polling; a second
+  `initializeSystem` while an attempt is in flight reports in-flight state
+  instead of silently no-oping; the boot screen disables Retry while running.
+- **scrcpy knobs exposed in settings**: virtual-display size/dpi, fps, codec,
+  bitrate, stay-awake, and screen-off-while-streaming, all threaded through
+  `ScrcpyArguments` into app launch. A scrcpy crash now keeps the last stderr
+  lines in the dev log and offers a Relaunch button on the window banner.
+- **Window shell polish.** Edge/corner resize affordances, drag-to-top snap,
+  redundant native `position` calls skipped (only real geometry changes are
+  forwarded), per-window surface visibility on panel open, game-mode
+  coordinates mapped from Android display space with clamping.
+- **Error taxonomy.** Reinstall-class failures (missing bundle/APK/JAR) no
+  longer offer the device picker (`isReinstallError` guards
+  `isConnectionError`).
+- Cleanup: duplicate `notification_toast_overlay.dart` merged into `lib/home/`,
+  `analysis_options.yaml` excludes the vendored `tools/flutter` SDK so plain
+  `flutter analyze` works, `GameProfileStore` logs via `DevLog`.
+- **33 tests pass** (`flutter test`), including a fake-server boot-failure
+  harness (`test/boot_service_failures_test.dart`) and scrcpy argument
+  coverage. The embedded-window drag test now drives a real multi-move
+  gesture and asserts the window actually moved (the old 20 px drag never
+  crossed the 36 px pan slop and passed vacuously).
+- CI archives the Windows Release output as a build artifact.
 ## September 15 reconstruction progress
 
-- Active HomeScreen now renders `lib/home/desktop_screen.dart`.
+- Active HomeScreen renders `lib/home/desktop_screen.dart`.
 - Added bundled wallpapers and Samsung typography, blurred glass panels,
   desktop shortcuts, searchable app launcher, clock, device tray, wallpaper
   picker, and a running-app list.
@@ -12,55 +51,54 @@
   1280x720/240 virtual display per app. `--desktop-transport` gives each
   process its own generated `scid` and flex-resizes the Android display to the
   embedded Win32 child window while preserving logical density.
-- Thirteen tests pass, including desktop panel interactions at 1280x720 and
-  720x600. Analyzer was clean before the final glass Material wrapper fix.
-- NativeDesktopWindows now has a Windows method handler: scrcpy windows attach
+- **24 tests pass** (`flutter test`), including desktop panel interactions at
+  1280x720 and 720x600. `flutter analyze lib test` is clean. Release builds
+  succeed (`flutter build windows`).- NativeDesktopWindows has a Windows method handler: scrcpy windows attach
   to the Flutter view with SetParent, with DPI-scaled bounds and Flutter frames.
   Live Acode video rendered inside the desktop; launcher overlay also verified.
   Startup must wait for a visible nonzero client window before attachment and
   pass --no-window-aspect-ratio-lock to avoid the observed C0000094 crash.
-  No scrcpy source modifications were required. Thirteen tests pass; release builds.
 - App launch also passes `--no-vd-system-decorations`, so the embedded stream
   contains only the selected Android app instead of Android's status/navigation
-  bars and virtual-display taskbar. Live Acode verification passed on a clean
-  Flutter process.
+  bars and virtual-display taskbar.
 - The Flutter host pins `SCRCPY_SERVER_PATH` to the matching fork server and
-  packages the fork runtime (including its SDL/FFmpeg dependencies). The
-  stock Android-Dex 4.0 executable is retained only as a fallback when the
-  fork is unavailable.
-- Closing an embedded app now sends a native `WM_CLOSE` first and only force
-  terminates after a short timeout, allowing scrcpy to tear down its virtual
-  display instead of leaking a stale Android display.
-- Still needed: live visual comparison and launch validation, analog clock,
-  persistent preferences, embedded app window lifecycle, media/notification
-  controls, and the remaining official desktop behaviors.
+  packages the fork runtime (including its SDL/FFmpeg dependencies).
+- Closing an embedded app sends a native `WM_CLOSE` first and only force
+  terminates after a short timeout.
 
-### Original objective
+### Parity work added this pass
 
-Build a Flutter/Dart Windows desktop replica of the Android-Dex host in this
-repository, using the existing Android-Dex v1.2 APK/JAR artifacts as the Android
-backend. The active implementation is the Flutter project at the repository
-root (`lib/`, `windows/`, and `pubspec.yaml`). The old `rewritedex-native/`
-project is not the active desktop host.
+- **Media + notification channels are wired.** The two callback ports (3700,
+  3701) now feed `MediaDataManager` / `NotificationDataManager` and the new
+  Media Center and Notification Center panels. Verified against the v1.2 bin:
+  the channels are plain newline-delimited TCP, not WebSocket (see
+  `docs/HOST_ARCHITECTURE.md`).
+- **Device manager.** `DeviceManager` supports USB and Wi-Fi targets
+  (`--usb` / `ip`, `adb connect`), and the boot screen offers the ADB Manager
+  dialog on connection failure instead of freezing.
+- **Reconnection.** `ReconnectionManager` executes two-phase auto-heal and a
+  `Reconnecting` overlay blocks the desktop during recovery.
+- **Two-tier errors.** `AndroidDexError` keeps raw output in `DevLog` while the
+  UI shows plain-English recovery guidance; `ConnectionFailure` reveals the
+  device-picker button.
+- **Window shell.** Each app window supports drag, resize, snap, maximize and
+  minimize via `WindowManager`; the taskbar lists running windows; Recents uses
+  `WindowThumbnailService` captures (falling back to the app icon).
+- **Keyboard shortcuts + fullscreen.** `Ctrl+F`/`F11`, `Esc`, `Ctrl+W/M`,
+  `Ctrl+Tab`, `Ctrl+Shift+←/→/↑/↓`, `Ctrl+Alt+↑/↓/←/→`, `Ctrl+/` help overlay.
 
-## Verified status (September 14, 2026)
+## Verified status (metadata)
 
-The Flutter/Dart desktop now builds, packages, launches, and completes its
-backend boot sequence against a real Pixel 9 Pro XL.
-
-- `flutter analyze lib test`: no issues
-- `flutter test`: 9 tests pass
+- `flutter analyze`: no issues
+- `flutter test`: 33 tests pass
 - `flutter build windows`: succeeds
 - Packaged executable:
   `build/windows/x64/runner/Release/androiddex_host.exe`
-- Live validation confirmed established callback channels owned by the Flutter
-  process:
+- Callback channels owned by the Flutter process:
   - JAR TCP: `127.0.0.1:3698`
   - APK WebSocket: `127.0.0.1:3699`
   - Notification TCP: `127.0.0.1:3700`
   - Media TCP: `127.0.0.1:3701`
-- The v1.2 APK foreground service and JAR `app_process` runtime remained alive
-  after the handshakes.
 
 ## Completed foundation
 
@@ -148,10 +186,31 @@ command forwarding.
   - unknown event tolerance
 - `test/boot_service_test.dart`
   - authorized device parsing
-  - one ADB invocation per reverse mapping
+  - one ADB (reverse) invocation per bridged port; `-d` vs `-s` selectors
+- `test/error_messages_test.dart`
+  - `AndroidDexError` two-tier contract; raw vs user-facing text
+  - `isConnectionError` heuristic
+  - tolerant JSON readers (flat and nested shapes)
+- `test/channel_managers_test.dart`
+  - media channel handshake + now-playing + bare state change
+  - notification ring, grouping, removal, bulk resends
+- `test/core_services_test.dart`
+  - `DeviceManager` USB/Wi-Fi resolution, CLI parsing, IP normalisation
+  - `WindowManager` focus order, snap, minimize/restore
+  - `setBootError` notifier (regression for the frozen-error-panel bug)
+- `test/embedded_app_window_test.dart`
+  - native surface attach; real-drag reposition (movement + position call
+    asserted); minimize hides the frame
+- `test/boot_service_failures_test.dart`
+  - clean failure when the host bundle is missing (and no device picker)
+  - handshake waiter resolution/timeout; reset fails pending waiters
+  - concurrent `initializeSystem` refusal
+- `test/scrcpy_arguments_test.dart`
+  - display/fps/codec/bitrate/stay-awake/screen-off argument composition
+- `test/desktop_screen_test.dart`
+  - desktop panels at 1280x720 and 720x600
 - `test/host_servers_test.dart`
-  - v1.2 root WebSocket handshake
-  - JAR handshake and multi-line framing
+  - v1.2 root WebSocket handshake; JAR handshake and multi-line framing
   - outbound APK and JAR command delivery
 - `test/widget_test.dart`
   - Flutter application smoke test
@@ -161,24 +220,31 @@ command forwarding.
 - APK application ID: `com.shrey.androiddex`
 - Foreground service:
   `com.shrey.androiddex.init_start_server.ServerStartService`
-- APK callback URL: `ws://127.0.0.1:3699` (root path)
+- APK callback URL: `ws://127.0.0.1:3699` (root path) — the only WebSocket
+  channel; ports 3700/3701 are plain newline-delimited TCP.
 - JAR entry point: `com.shrey.androiddex.server.Main`
-- APK local JAR-forwarding listener: Android port `8457`
-- Media and notification services use newline-delimited TCP callback sockets
-  on 3701 and 3700.
+- APK local JAR-forwarding listener: Android port `8457` (never reversed)
+- JAR commands: `app.start_on_display`, `app.force_stop`, `volume.get_all`
+  / `.set`, `display.power.get` / `.set`, `wifi.get_details`,
+  `clipboard.text` / `.set` / `.toggle`, `shell` (Runtime.exec passthrough)
+- APK commands/events: `get_all_apps`, `apk.permissions.get`, `state.get_all`,
+  `apk.hello`, `apk.app_added`, `apk.app_removed`, `apk.app_count`,
+  `battery_small`, `battery_update`, `volume_update`
 
 ## Next milestone
 
-The highest-value next task is launching an app selected from the live Flutter
-catalog into a scrcpy-backed Android window:
+The per-app window pipeline is built and covered by unit/widget tests; the
+remaining validation is **live on a device**:
 
-1. Send the selected package through the JAR `app.start_on_display` flow.
-2. Launch the bundled scrcpy runtime for that Android display.
-3. Embed or manage the scrcpy native window from the Flutter Windows runner.
-4. Build per-app window lifecycle, taskbar, and recents behavior around it.
-5. Replace the remaining home-screen action stubs with live panels.
-6. Add disconnect detection and automatic reconnection after the core replica
-   workflow is functional.
+1. Launch a real app from the catalog and confirm the scrcpy surface embeds
+   inside the Flutter-drawn frame (was working before this pass).
+2. Exercise snap / maximize / minimize and Recents thumbnails live.
+3. Confirm media and notification panels populate from a real device session.
+4. Observe the reconnection overlay by unplugging/re-plugging the device.
+5. Wire the last two stubs (gaming-mode hotkey is intentionally not
+   implemented; see the shortcut help).
 
-Before implementing those screens, preserve the currently verified boot and
-handshake tests. Do not switch work back to `rewritedex-native/`.
+Preserve the verified boot/handshake tests; do not switch work back to
+`rewritedex-native/`. `package.ps1` and `bootstrap.ps1` now target the Flutter
+host. `host_bundle/` **is** committed (`.gitignore` un-ignores it at line 77)
+— an earlier revision of this file claimed otherwise.

@@ -13,6 +13,8 @@ analyzer:
   exclude:
     - build/**
     - windows/**
+    # Vendored Flutter SDK checkout (git-ignored) must not be analyzed.
+    - tools/flutter/**
 
 linter:
   # The lint rules applied to this project can be customized in the

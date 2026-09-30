@@ -34,3 +34,4 @@ CMakeLists.txt text eol=lf
 third_party/scrcpy/** linguist-vendored
 third_party/scrcpy-fork/** linguist-vendored
 docs/archive/** linguist-vendored
+lib/**/*.g.dart linguist-generated

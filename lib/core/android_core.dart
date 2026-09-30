@@ -1,60 +1,64 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show Offset, Size;
 
 import 'package:flutter/foundation.dart';
 
 import 'package:androiddex_host/core/android_core_messages.dart';
 import 'package:androiddex_host/core/app_paths.dart';
+import 'package:androiddex_host/core/dev_log.dart';
+import 'package:androiddex_host/core/error_messages.dart';
+import 'package:androiddex_host/core/models.dart';
+import 'package:androiddex_host/core/protocol.dart';
+import 'package:androiddex_host/core/scrcpy_arguments.dart';
+import 'package:androiddex_host/host/media_data_manager.dart';
+import 'package:androiddex_host/host/notification_data_manager.dart';
 import 'package:androiddex_host/services/boot_service.dart';
+import 'package:androiddex_host/services/device_manager.dart';
 import 'package:androiddex_host/services/native_desktop_windows.dart';
+import 'package:androiddex_host/services/reconnection_manager.dart';
+import 'package:androiddex_host/services/settings_store.dart';
+import 'package:androiddex_host/services/window_manager.dart';
+import 'package:androiddex_host/services/window_thumbnail_service.dart';
 
-class AndroidAppInfo {
-  const AndroidAppInfo({
-    required this.name,
-    required this.packageName,
-    required this.versionName,
-    required this.iconBase64,
-  });
-
-  factory AndroidAppInfo.fromJson(Map<String, dynamic> json) => AndroidAppInfo(
-    name: json['app_name'] as String? ?? json['package_name'] as String? ?? '',
-    packageName: json['package_name'] as String? ?? '',
-    versionName: json['version_name'] as String? ?? '',
-    iconBase64: json['icon_base64'] as String? ?? '',
-  );
-
-  final String name;
-  final String packageName;
-  final String versionName;
-  final String iconBase64;
-}
-
-class DesktopAppWindow {
-  const DesktopAppWindow({
-    required this.app,
-    required this.startedAt,
-    required this.processId,
-  });
-
-  final AndroidAppInfo app;
-  final DateTime startedAt;
-  final int processId;
-}
+// `AndroidAppInfo` and `DesktopAppWindow` now live in `core/models.dart` so the
+// window manager can use them without a cyclic dependency. They are
+// re-exported here to keep existing imports of `android_core.dart` working.
+export 'package:androiddex_host/core/models.dart'
+    show AndroidAppInfo, DesktopAppWindow;
 
 /// Central reactive state store mirroring the Android-Dex `AndroidCore` host
 /// state model. The Flutter UI reads from these fields and rebuilds when
 /// their notifiers change.
 class AndroidCore extends ChangeNotifier {
-  AndroidCore()
-    : appProgress = ValueNotifier<double>(0),
+  AndroidCore({DeviceManager? deviceManager, SettingsStore? settingsStore})
+    : settings = settingsStore ?? SettingsStore.instance,
+      appProgress = ValueNotifier<double>(0),
       jarProgress = ValueNotifier<double>(0),
       appLabel = ValueNotifier<String>(''),
       jarLabel = ValueNotifier<String>('') {
-    _boot = BootService(this);
+    _boot = BootService(this, deviceManager: deviceManager);
+    _reconnection = ReconnectionManager(this);
   }
 
   BootService get boot => _boot!;
   BootService? _boot;
+
+  /// Persistent host preferences (wallpaper, last device).
+  final SettingsStore settings;
+
+  /// Device media session mirror, fed by the 3701 callback channel.
+  final MediaDataManager media = MediaDataManager();
+
+  /// Device notification mirror, fed by the 3700 callback channel.
+  final NotificationDataManager notifications = NotificationDataManager();
+
+  /// Open app windows: geometry, z-order, tiling.
+  final WindowManager windows = WindowManager();
+
+  ReconnectionManager? _reconnection;
+  ReconnectionManager get reconnection => _reconnection!;
 
   bool _bootFinished = false;
   bool _jarConnected = false;
@@ -65,9 +69,27 @@ class AndroidCore extends ChangeNotifier {
   final ValueNotifier<bool> apkConnected = ValueNotifier<bool>(false);
   final ValueNotifier<bool> allConnected = ValueNotifier<bool>(false);
 
+  /// Aliases used by completer-based waiters that must not depend on the
+  /// `ChangeNotifier` side of this class (avoids listener aliasing).
+  ValueListenable<bool> get jarConnectedNotifier => jarConnected;
+  ValueListenable<bool> get apkConnectedNotifier => apkConnected;
+
   final ValueNotifier<String> status = ValueNotifier<String>('Initializing…');
   final ValueNotifier<bool> bootError = ValueNotifier<bool>(false);
   final ValueNotifier<String> bootErrorMessage = ValueNotifier<String>('');
+
+  /// Mirrors `BootService.isRunning` so the UI can disable retry actions
+  /// while an initialization attempt is still in flight.
+  final ValueNotifier<bool> bootInProgress = ValueNotifier<bool>(false);
+
+  /// A non-fatal post-boot problem: an optional device channel did not come
+  /// up. The desktop is usable, but the affected panel will stay empty, so
+  /// the warning has to outlive the boot screen to be seen.
+  final ValueNotifier<String> bootWarning = ValueNotifier<String>('');
+
+  /// True when the current boot failure can be resolved by choosing a
+  /// different ADB target, which reveals the "Open ADB Manager" button.
+  final ValueNotifier<bool> canPickDevice = ValueNotifier<bool>(false);
 
   final ValueNotifier<double> appProgress;
   final ValueNotifier<double> jarProgress;
@@ -138,8 +160,11 @@ class AndroidCore extends ChangeNotifier {
   bool permissionGranted(String key) => _permissionsData[key] ?? false;
   int get permissionTimestamp => _permissionTimestamp;
 
-  final String _deviceId = '';
+  String _deviceId = '';
   String get deviceId => _deviceId;
+
+  /// The ADB target currently in use (`-d`, a serial, or `ip:port`).
+  DeviceManager get devices => _boot!.devices;
 
   List<AndroidAppInfo> _apps = const [];
   bool _appsLoading = false;
@@ -147,6 +172,7 @@ class AndroidCore extends ChangeNotifier {
   final Map<String, Process> _appProcesses = {};
   final List<DesktopAppWindow> _desktopWindows = [];
   String _launchError = '';
+  AndroidAppInfo? _lastFailedApp;
   bool _disposed = false;
 
   List<AndroidAppInfo> get apps => _apps;
@@ -156,6 +182,10 @@ class AndroidCore extends ChangeNotifier {
       List.unmodifiable(_desktopWindows);
   String get launchError => _launchError;
 
+  /// The app that most recently failed to launch, if any. The desktop offers a
+  /// one-click relaunch for it next to the error banner.
+  AndroidAppInfo? get lastFailedApp => _lastFailedApp;
+
   bool get bootFinished => _bootFinished;
   bool get jarConnectedValue => _jarConnected;
   bool get apkConnectedValue => _apkConnected;
@@ -163,6 +193,20 @@ class AndroidCore extends ChangeNotifier {
 
   void start() {
     boot.initializeSystem();
+  }
+
+  /// Requests another boot unless one is already running.
+  ///
+  /// `initializeSystem` silently ignores concurrent calls, which made the
+  /// retry button look broken; surfacing the state keeps the UI honest.
+  Future<void> retryBoot() async {
+    if (boot.isRunning) {
+      bootInProgress.value = true;
+      return;
+    }
+    _reconnection?.stopMonitoring();
+    await _boot?.reset();
+    start();
   }
 
   void markJarConnected() {
@@ -196,6 +240,15 @@ class AndroidCore extends ChangeNotifier {
   }
 
   void updateFromMessage(AndroidCoreMessage message) {
+    // Every message may carry the reporting device id; keep it so the desktop
+    // can label which handset is attached.
+    final reportedId = message.deviceId;
+    if (reportedId != null &&
+        reportedId.isNotEmpty &&
+        reportedId != _deviceId) {
+      _deviceId = reportedId;
+      notifyListeners();
+    }
     for (final state in message.states ?? <AndroidCoreState>[]) {
       _applyState(state);
     }
@@ -218,47 +271,52 @@ class AndroidCore extends ChangeNotifier {
     }
   }
 
+  /// Applies a device-state delta. Fields are merged first and listeners are
+  /// notified once — per-field notifications were fanning a single message out
+  /// into up to ten desktop rebuilds.
   void _applyState(AndroidCoreState state) {
+    var changed = false;
     if (state.wifi != null) {
       _wifi = state.wifi!;
-      notifyListeners();
+      changed = true;
     }
     if (state.wifiName != null) {
       _wifiName = state.wifiName!;
-      notifyListeners();
+      changed = true;
     }
     if (state.bluetooth != null) {
       _bluetooth = state.bluetooth!;
-      notifyListeners();
+      changed = true;
     }
     if (state.bluetoothName != null) {
       _bluetoothName = state.bluetoothName!;
-      notifyListeners();
+      changed = true;
     }
     if (state.mobileData != null) {
       _mobileData = state.mobileData!;
-      notifyListeners();
+      changed = true;
     }
     if (state.airplaneMode != null) {
       _airplane = state.airplaneMode!;
-      notifyListeners();
+      changed = true;
     }
     if (state.mute != null) {
       _mute = state.mute!;
-      notifyListeners();
+      changed = true;
     }
     if (state.rotationLock != null) {
       _rotationLock = state.rotationLock!;
-      notifyListeners();
+      changed = true;
     }
     if (state.location != null) {
       _location = state.location!;
-      notifyListeners();
+      changed = true;
     }
     if (state.torch != null) {
       _torch = state.torch!;
-      notifyListeners();
+      changed = true;
     }
+    if (changed) notifyListeners();
   }
 
   void _applyBatterySmall(BatterySmall small) {
@@ -341,14 +399,64 @@ class AndroidCore extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setBootError(String message) {
+  /// Publishes a boot failure.
+  ///
+  /// The error panel in `BootScreen` is gated on [bootError], which is read
+  /// directly during `build()` rather than through a `ValueListenableBuilder`.
+  /// The notifier flip therefore has to notify this [ChangeNotifier] as well,
+  /// otherwise the owner never rebuilds and the message never reaches the user.
+  void setBootError(String message, {bool canPickDevice = false}) {
     bootError.value = true;
     bootErrorMessage.value = message;
+    this.canPickDevice.value = canPickDevice;
     status.value = message;
+    notifyListeners();
   }
+
+  void clearBootError() {
+    bootError.value = false;
+    bootErrorMessage.value = '';
+    canPickDevice.value = false;
+    notifyListeners();
+  }
+
+  /// Clears per-attempt connection state so a retry starts from scratch.
+  void resetRuntimeState() {
+    _jarConnected = false;
+    _apkConnected = false;
+    _allConnected = false;
+    jarConnected.value = false;
+    apkConnected.value = false;
+    allConnected.value = false;
+    appProgress.value = 0;
+    jarProgress.value = 0;
+    canPickDevice.value = false;
+    bootWarning.value = '';
+    media.markDisconnected();
+    notifications.clearAll();
+    notifyListeners();
+  }
+
+  /// Starts the post-boot connection watchdog. Idempotent.
+  void startMonitoring() => _reconnection?.startMonitoring();
+
+  /// Rescans the attached ADB devices for the ADB Manager dialog.
+  Future<List<AdbDevice>> refreshDevices() => devices.refresh();
 
   void setStatus(String value) {
     status.value = value;
+    notifyListeners();
+  }
+
+  /// Records a degraded-but-usable boot state, naming the channels that did
+  /// not respond. Emptying the string clears the warning.
+  void warnIfChannelMissing(String channels) {
+    bootWarning.value = channels.isEmpty
+        ? ''
+        : 'Connected, but the device $channels channel did not respond. '
+              'Those panels will stay empty until the companion app is '
+              'restarted.';
+    notifyListeners();
   }
 
   Future<void> refreshApps() async {
@@ -357,12 +465,20 @@ class AndroidCore extends ChangeNotifier {
     _appsError = '';
     notifyListeners();
     try {
-      final response = await boot.sendApkCommand('get_all_apps');
+      final response = await boot.sendApkCommand(DexProtocol.apkGetAllApps);
       if (response['status'] != 'success') {
-        throw StateError(response['message']?.toString() ?? 'App list failed');
+        throw AndroidDexError(
+          'The app list could not be read from the device.',
+          devDetail: response['message']?.toString(),
+        );
       }
       final rawApps = response['apps'];
-      if (rawApps is! List) throw const FormatException('Missing app list');
+      if (rawApps is! List) {
+        throw const AndroidDexError(
+          'The app list could not be read from the device.',
+          devDetail: 'missing "apps" array',
+        );
+      }
       final apps =
           rawApps
               .whereType<Map>()
@@ -377,7 +493,8 @@ class AndroidCore extends ChangeNotifier {
             );
       _apps = List.unmodifiable(apps);
     } catch (error) {
-      _appsError = error.toString().replaceFirst('Bad state: ', '');
+      DevLog.logError(error, scope: 'apps');
+      _appsError = userMessageFor(error);
     } finally {
       _appsLoading = false;
       notifyListeners();
@@ -392,87 +509,160 @@ class AndroidCore extends ChangeNotifier {
     }
 
     _launchError = '';
+    _lastFailedApp = null;
     try {
       final executable = AppPaths.scrcpyExe;
       if (!await executable.exists()) {
-        throw StateError('The bundled Android window runtime is missing.');
+        throw const AndroidDexError(
+          kWindowRuntimeMissing,
+          devDetail: 'scrcpy client missing',
+        );
       }
       final server = AppPaths.scrcpyServer;
       if (!await server.exists()) {
-        throw StateError('The matching Android window server is missing.');
+        throw const AndroidDexError(
+          kWindowServerMissing,
+          devDetail: 'scrcpy-server missing',
+        );
       }
-      final transportSizing = AppPaths.usesRewriteDexScrcpy
+      // The bundled fork implements `--start-app` itself, which is the verified
+      // path. A stock scrcpy runtime has no such flag, so for that case the app
+      // is placed on the new display through the JAR `app.start_on_display`
+      // command instead.
+      final forkRuntime = AppPaths.usesRewriteDexScrcpy;
+      final transportSizing = forkRuntime
           ? '--desktop-transport'
           : '--flex-display';
+      final arguments = [
+        scrcpyDisplayArgument(settings.displaySize),
+        transportSizing,
+        '--render-fit=unscaled',
+        '--display-ime-policy=local',
+        '--no-vd-system-decorations',
+        if (forkRuntime) '--start-app=${app.packageName}',
+        '--window-title=Android DEX · ${app.name}',
+        '--window-x=-32000',
+        '--window-y=-32000',
+        '--window-borderless',
+        '--no-window-aspect-ratio-lock',
+        scrcpyMaxFpsArgument(settings.videoFps),
+        scrcpyVideoCodecArgument(settings.videoCodec),
+        scrcpyVideoBitRateArgument(settings.videoBitrateMbps),
+        if (settings.stayAwake) scrcpyStayAwakeArgument,
+        if (settings.turnScreenOff) scrcpyTurnScreenOffArgument,
+      ];
       final environment = Map<String, String>.from(Platform.environment)
         ..['SCRCPY_SERVER_PATH'] = server.path
         ..['SCRCPY_ICON_DIR'] = AppPaths.scrcpyRuntimeDir.path;
       final process = await Process.start(
         executable.path,
-        [
-          '--new-display=1280x720/240',
-          transportSizing,
-          '--render-fit=unscaled',
-          '--display-ime-policy=local',
-          '--no-vd-system-decorations',
-          '--start-app=${app.packageName}',
-          '--window-title=Android DEX · ${app.name}',
-          '--window-x=-32000',
-          '--window-y=-32000',
-          '--window-borderless',
-          '--no-window-aspect-ratio-lock',
-          '--max-fps=60',
-          '--video-codec=h264',
-        ],
+        arguments,
         environment: environment,
         workingDirectory: AppPaths.scrcpyRuntimeDir.path,
         mode: ProcessStartMode.normal,
       );
       _appProcesses[app.packageName] = process;
-      _desktopWindows.add(
-        DesktopAppWindow(
-          app: app,
-          startedAt: DateTime.now(),
-          processId: process.pid,
-        ),
+      final window = DesktopAppWindow(
+        app: app,
+        startedAt: DateTime.now(),
+        processId: process.pid,
+      );
+      _desktopWindows.add(window);
+      final saved = settings.windowStateFor(app.packageName);
+      final savedSnap = saved?['snap'] as int?;
+      final snap = savedSnap != null
+          ? WindowSnap.values[savedSnap.clamp(0, WindowSnap.values.length - 1)]
+          : WindowSnap.none;
+      windows.open(
+        window,
+        origin: saved != null
+            ? Offset(
+                saved['x']?.toDouble() ?? 160,
+                saved['y']?.toDouble() ?? 80,
+              )
+            : const Offset(160, 80),
+        extent: saved != null
+            ? Size(
+                saved['width']?.toDouble() ?? 850,
+                saved['height']?.toDouble() ?? 520,
+              )
+            : const Size(850, 520),
+        snap: snap,
       );
       notifyListeners();
 
+      if (!forkRuntime) {
+        unawaited(_placeOnDisplay(app));
+      }
+
+      // scrcpy reports mirror failures on stderr; keep a short tail so a
+      // crash can be explained instead of surfacing a bare exit code.
+      final stderrTail = <String>[];
       unawaited(process.stdout.drain<void>());
-      unawaited(process.stderr.drain<void>());
+      unawaited(
+        process.stderr
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .listen(stderrTail.add)
+            .asFuture<void>(),
+      );
       unawaited(
         process.exitCode.then((code) {
           _appProcesses.remove(app.packageName);
           _desktopWindows.removeWhere(
-            (window) => window.app.packageName == app.packageName,
+            (candidate) => candidate.packageName == app.packageName,
           );
+          windows.close(app.packageName);
           if (code != 0) {
-            _launchError = '${app.name} could not open (exit $code).';
+            final detail = stderrTail.isEmpty
+                ? ''
+                : ' — ${stderrTail.take(3).join(' · ')}';
+            _launchError = '${app.name} could not open (exit $code)$detail.';
+            _lastFailedApp = app;
+            DevLog.log(
+              'scrcpy exit $code for ${app.packageName}: '
+              '${stderrTail.join('\n')}',
+              scope: 'launch',
+            );
           }
           if (!_disposed) notifyListeners();
         }),
       );
     } catch (error) {
-      _launchError = error.toString().replaceFirst('Bad state: ', '');
+      DevLog.logError(error, scope: 'launch');
+      _launchError = userMessageFor(error);
       notifyListeners();
     }
   }
 
+  /// Places an app on its virtual display through the JAR command channel.
+  ///
+  /// Best effort: the window stays usable even when the device refuses.
+  Future<void> _placeOnDisplay(AndroidAppInfo app) async {
+    try {
+      await boot.startAppOnDisplay(app.packageName);
+    } catch (error) {
+      DevLog.logError(error, scope: 'launch');
+    }
+  }
+
   Future<void> closeAppWindow(DesktopAppWindow window) async {
-    final process = _appProcesses[window.app.packageName];
+    final packageName = window.packageName;
+    final process = _appProcesses[packageName];
     if (process != null) await _closeScrcpyProcess(process);
-    _appProcesses.remove(window.app.packageName);
+    _appProcesses.remove(packageName);
     _desktopWindows.removeWhere(
-      (candidate) => candidate.app.packageName == window.app.packageName,
+      (candidate) => candidate.packageName == packageName,
     );
+    windows.close(packageName);
+    WindowThumbnailService.instance.forget(window.processId);
     notifyListeners();
     try {
-      await boot.sendJarCommand(
-        'app.force_stop',
-        arguments: {'package_name': window.app.packageName},
-      );
-    } catch (_) {
-      // The native scrcpy window is already closed; device cleanup is best effort.
+      await boot.forceStop(packageName);
+    } catch (error) {
+      // The native scrcpy window is already closed, so device cleanup is
+      // best effort.
+      DevLog.logError(error, scope: 'launch');
     }
   }
 
@@ -484,12 +674,20 @@ class AndroidCore extends ChangeNotifier {
     }
     _appProcesses.clear();
     _boot?.dispose();
+    _reconnection?.dispose();
+    media.dispose();
+    notifications.dispose();
+    windows.dispose();
+    WindowThumbnailService.instance.clear();
     jarConnected.dispose();
     apkConnected.dispose();
     allConnected.dispose();
     status.dispose();
     bootError.dispose();
     bootErrorMessage.dispose();
+    bootInProgress.dispose();
+    bootWarning.dispose();
+    canPickDevice.dispose();
     appProgress.dispose();
     jarProgress.dispose();
     appLabel.dispose();

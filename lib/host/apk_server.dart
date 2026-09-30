@@ -84,27 +84,42 @@ class ApkServer {
           _onMessage?.call(trimmed);
           if (!handshakeComplete && _messageType(trimmed) == 'apk.hello') {
             handshakeComplete = true;
+            // A second handshake replaces the previous client so the stale
+            // socket cannot keep delivering interleaved telemetry.
+            final previous = _activeClient;
+            if (previous != null && !identical(previous, socket)) {
+              _clients.remove(previous);
+              unawaited(previous.close());
+            }
             _activeClient = socket;
             _onClientConnected?.call();
           }
         },
         onDone: () {
           _clients.remove(socket);
-          if (identical(_activeClient, socket)) _activeClient = null;
-          reportDisconnect();
+          // Only the active client's disconnect flips channel state; a socket
+          // we just replaced must not report a disconnect.
+          if (identical(_activeClient, socket)) {
+            _activeClient = null;
+            reportDisconnect();
+          }
         },
         onError: (_) {
           _clients.remove(socket);
-          if (identical(_activeClient, socket)) _activeClient = null;
-          reportDisconnect();
+          if (identical(_activeClient, socket)) {
+            _activeClient = null;
+            reportDisconnect();
+          }
         },
         cancelOnError: true,
       );
     } catch (_) {
       if (socket != null) {
         _clients.remove(socket);
-        if (identical(_activeClient, socket)) _activeClient = null;
-        reportDisconnect();
+        if (identical(_activeClient, socket)) {
+          _activeClient = null;
+          reportDisconnect();
+        }
         await socket.close();
       }
     }

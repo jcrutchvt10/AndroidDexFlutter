@@ -1,4 +1,4 @@
-#ifndef RUNNER_FLUTTER_WINDOW_H_
+﻿#ifndef RUNNER_FLUTTER_WINDOW_H_
 #define RUNNER_FLUTTER_WINDOW_H_
 
 #include <flutter/dart_project.h>
@@ -10,6 +10,7 @@
 #include <flutter/encodable_value.h>
 
 #include "win32_window.h"
+#include "window_thumbnail.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -34,6 +35,10 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> windows_channel_;
   std::map<DWORD, HWND> embedded_windows_;
   bool surfaces_visible_ = true;
+   // Borderless-fullscreen state; the pre-fullscreen placement is restored
+   // when the mode is toggled off.
+   bool fullscreen_ = false;
+   WINDOWPLACEMENT saved_placement_ = {};
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

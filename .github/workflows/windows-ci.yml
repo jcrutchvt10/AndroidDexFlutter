@@ -26,3 +26,16 @@ jobs:
         run: flutter test
       - name: Build Windows host
         run: flutter build windows
+      - name: Verify packaged output exists
+        shell: powershell
+        run: |
+          $exe = "build\windows\x64\runner\Release\androiddex_host.exe"
+          if (-not (Test-Path $exe)) { throw "Missing $exe" }
+          Write-Host "Packaged host OK: $exe"
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: androiddex-host-windows
+          path: build/windows/x64/runner/Release/
+          if-no-files-found: error
+          retention-days: 7

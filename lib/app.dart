@@ -4,9 +4,14 @@ import 'package:androiddex_host/home/home_screen.dart';
 import 'package:androiddex_host/boot/boot_screen.dart';
 import 'package:androiddex_host/core/android_core.dart';
 import 'package:androiddex_host/core/app_paths.dart';
+import 'package:androiddex_host/core/dev_log.dart';
+import 'package:androiddex_host/services/device_manager.dart';
 
 class AndroidDexHostApp extends StatelessWidget {
-  const AndroidDexHostApp({super.key});
+  const AndroidDexHostApp({super.key, this.deviceManager});
+
+  /// ADB target resolved from the command line, if any.
+  final DeviceManager? deviceManager;
 
   @override
   Widget build(BuildContext context) {
@@ -34,13 +39,15 @@ class AndroidDexHostApp extends StatelessWidget {
         ),
       ),
       themeMode: ThemeMode.system,
-      home: const AppRoot(),
+      home: AppRoot(deviceManager: deviceManager),
     );
   }
 }
 
 class AppRoot extends StatefulWidget {
-  const AppRoot({super.key});
+  const AppRoot({super.key, this.deviceManager});
+
+  final DeviceManager? deviceManager;
 
   @override
   State<AppRoot> createState() => _AppRootState();
@@ -53,8 +60,8 @@ class _AppRootState extends State<AppRoot> {
   @override
   void initState() {
     super.initState();
-    _core = AndroidCore();
-    _initPaths().then((_) {
+    _core = AndroidCore(deviceManager: widget.deviceManager);
+    _initialize().then((_) {
       if (!mounted) return;
       _core.start();
       setState(() {
@@ -63,8 +70,15 @@ class _AppRootState extends State<AppRoot> {
     });
   }
 
-  Future<void> _initPaths() async {
-    await AppPaths.initialize();
+  Future<void> _initialize() async {
+    try {
+      await AppPaths.initialize();
+      DevLog.initialize(AppPaths.userDataDir.path);
+      await _core.settings.load();
+    } catch (error) {
+      // A missing bundle must not stop the UI from rendering an explanation.
+      DevLog.logError(error, scope: 'startup');
+    }
   }
 
   @override

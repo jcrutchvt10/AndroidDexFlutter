@@ -1,10 +1,13 @@
-#include "flutter_window.h"
+﻿#include "flutter_window.h"
 
-#include <optional>
-#include <flutter/standard_method_codec.h>
 #include <cmath>
+#include <optional>
+#include <string>
+
+#include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "fullscreen_support.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -122,6 +125,45 @@ bool FlutterWindow::OnCreate() {
       if (child) {
         PostMessage(child, WM_CLOSE, 0, 0);
         embedded_windows_.erase(pid);
+      }
+      result->Success(); return;
+    }
+    if (method == "window_visible") {
+      if (child) {
+        auto it = args->find(flutter::EncodableValue("visible"));
+        const bool visible = it != args->end() &&
+                             std::holds_alternative<bool>(it->second) &&
+                             std::get<bool>(it->second);
+        ShowWindow(child, visible ? SW_SHOWNA : SW_HIDE);
+      }
+      result->Success(); return;
+    }
+    if (method == "raise") {
+      if (child) {
+        SetWindowPos(child, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE |
+                         SWP_NOOWNERZORDER);
+        BringWindowToTop(child);
+        SetFocus(child);
+      }
+      result->Success(); return;
+    }
+    if (method == "thumbnail") {
+      if (child) {
+        result->Success(CaptureThumbnailValue(child));
+      } else {
+        result->Success(flutter::EncodableValue(""));
+      }
+      return;
+    }
+    if (method == "fullscreen") {
+      auto it = args->find(flutter::EncodableValue("fullscreen"));
+      const bool target = it != args->end() &&
+                          std::holds_alternative<bool>(it->second) &&
+                          std::get<bool>(it->second);
+      if (target != fullscreen_) {
+        fullscreen_ = target;
+        ApplyFullscreen(GetHandle(), fullscreen_, &saved_placement_);
       }
       result->Success(); return;
     }

@@ -1,4 +1,4 @@
-# Build dirs
+﻿# Build dirs
 build/
 build-msvc/
 build-msvc-ninja/
@@ -59,6 +59,11 @@ install_manifest.txt
 .agents/
 .claude/
 .mcp.json
+
+# Unrelated local tooling output and scratch fragments
+/deploy/
+/.freebuff/
+/get_repo.ps1
 
 # Screenshots / one-off debug captures
 screen-*.png

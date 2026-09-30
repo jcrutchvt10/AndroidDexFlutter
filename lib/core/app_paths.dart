@@ -6,6 +6,19 @@ class AppPaths {
   AppPaths._();
 
   static String? _appDir;
+  static String? _userDataDirOverride;
+
+  /// Test-only: pins the app directory without the bundle probe. Pass `null`
+  /// to restore the uninitialized state.
+  static void debugInitForTests(String? dir) => _appDir = dir;
+
+  /// Test-only: pins the per-user state directory.
+  ///
+  /// Without this seam a settings test would read (and potentially rewrite)
+  /// the real `%LOCALAPPDATA%\AndroidDEX\settings.json`, because
+  /// [userDataDir] reads `Platform.environment`, which cannot be stubbed.
+  static void debugInitUserDataDirForTests(String? dir) =>
+      _userDataDirOverride = dir;
 
   static String get appDir =>
       _appDir ?? (throw StateError('AppPaths not initialized'));
@@ -53,6 +66,18 @@ class AppPaths {
   );
 
   static Directory get dataDir => Directory(p.join(bundleDir, 'data'));
+
+  /// Per-user host state (`settings.json`, `dev.log`), kept outside the
+  /// installation directory so packaged builds remain read-only.
+  static Directory get userDataDir {
+    final override = _userDataDirOverride;
+    if (override != null) return Directory(override);
+    final base =
+        Platform.environment['LOCALAPPDATA'] ??
+        Platform.environment['APPDATA'] ??
+        Directory.systemTemp.path;
+    return Directory(p.join(base, 'AndroidDEX'));
+  }
 
   static Future<void> initialize() async {
     final candidates = <Directory>[

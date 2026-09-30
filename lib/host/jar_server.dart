@@ -43,6 +43,12 @@ class JarServer {
         _onMessage?.call(trimmed);
         if (!handshakeComplete && _messageType(trimmed) == 'jar.hello') {
           handshakeComplete = true;
+          // A second handshake replaces the previous client: keeping the stale
+          // socket alive would interleave two senders on the command channel.
+          final previous = _activeClient;
+          if (previous != null && !identical(previous, socket)) {
+            previous.destroy();
+          }
           _activeClient = socket;
           _onClientConnected?.call();
         }
@@ -50,9 +56,12 @@ class JarServer {
     } catch (_) {
       // The Android-side JAR reconnects automatically after a disconnect.
     } finally {
-      if (identical(_activeClient, socket)) _activeClient = null;
+      // Only report a disconnect when the dropping socket is still the active
+      // client — a socket we just replaced must not flip the channel state.
+      final wasActive = identical(_activeClient, socket);
+      if (wasActive) _activeClient = null;
       socket.destroy();
-      if (handshakeComplete) _onClientDisconnected?.call();
+      if (handshakeComplete && wasActive) _onClientDisconnected?.call();
     }
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:androiddex_host/core/protocol.dart';
 import 'package:androiddex_host/services/boot_service.dart';
 
 void main() {
@@ -15,10 +16,29 @@ USB456 unauthorized transport_id:2
   });
 
   test('each reverse mapping is emitted as a separate ADB command', () {
-    final commands = buildAdbReverseCommands('USB123');
+    final commands = buildAdbReverseCommands(['-s', 'USB123']);
 
-    expect(commands, hasLength(androidDexReversePorts.length));
-    expect(commands.first, ['-s', 'USB123', 'reverse', 'tcp:3698', 'tcp:3698']);
-    expect(commands.last, ['-s', 'USB123', 'reverse', 'tcp:3701', 'tcp:3701']);
+    expect(commands, hasLength(DexProtocol.reversePorts.length));
+    expect(commands.first, [
+      '-s',
+      'USB123',
+      'reverse',
+      'tcp:${DexProtocol.jarPort}',
+      'tcp:${DexProtocol.jarPort}',
+    ]);
+    expect(commands.last, [
+      '-s',
+      'USB123',
+      'reverse',
+      'tcp:${DexProtocol.mediaPort}',
+      'tcp:${DexProtocol.mediaPort}',
+    ]);
+  });
+
+  test('reverse mappings work with the USB transport selector', () {
+    final commands = buildAdbReverseCommands(['-d']);
+
+    expect(commands, hasLength(DexProtocol.reversePorts.length));
+    expect(commands.first.first, '-d');
   });
 }
