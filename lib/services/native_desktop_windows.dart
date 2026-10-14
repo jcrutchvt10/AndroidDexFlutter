@@ -9,7 +9,49 @@ class NativeDesktopWindows {
 
   static const _channel = MethodChannel('androiddex/windows');
 
+  /// Called by the Win32 runner when a click lands on an embedded surface.
+  /// The PID is the process ID of the scrcpy window that was clicked.
+  /// Set by DesktopScreen to route focus changes to WindowManager.
+  static void Function(int processId)? onSurfaceClicked;
+
+  /// Invoked from the method channel when C++ detects a surface click.
+  static void _handleSurfaceClicked(int processId) {
+    onSurfaceClicked?.call(processId);
+  }
+
+  static void _initChannel() {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'surfaceClicked') {
+        final pid = call.arguments as int?;
+        if (pid != null) _handleSurfaceClicked(pid);
+      } else if (call.method == 'filesDropped') {
+        final paths = call.arguments as List<dynamic>?;
+        if (paths != null) _handleFilesDropped(paths);
+      }
+      return null;
+    });
+  }
+
+  static bool _initialized = false;
+
+  /// Called by the Win32 runner when files are dropped on the host window.
+  /// Receives a list of file paths. Set by DesktopScreen to handle file push.
+  static void Function(List<String> paths)? onFilesDropped;
+
+  static void _handleFilesDropped(List<dynamic> paths) {
+    final stringPaths = paths.cast<String>();
+    onFilesDropped?.call(stringPaths);
+  }
+
+  static void _ensureInitialized() {
+    if (!_initialized) {
+      _initialized = true;
+      _initChannel();
+    }
+  }
+
   static Future<bool> embed(int processId, Rect rect) async {
+    _ensureInitialized();
     if (!Platform.isWindows) return false;
     return await _channel.invokeMethod<bool>('embed', {
           'process_id': processId,
@@ -85,18 +127,17 @@ class NativeDesktopWindows {
   /// Returns `null` when the surface cannot be captured (for example a
   /// GPU-composited window that refuses `PrintWindow`), so callers fall back
   /// to the app icon.
+  ///
+  /// The Win32 runner now returns the PNG bytes directly from an in-memory
+  /// stream — no temp file is written to disk.
   static Future<Uint8List?> thumbnail(int processId) async {
     if (!Platform.isWindows) return null;
     try {
-      final path = await _channel.invokeMethod<String>('thumbnail', {
+      final bytes = await _channel.invokeMethod<Uint8List>('thumbnail', {
         'process_id': processId,
       });
-      if (path == null || path.isEmpty) return null;
-      final file = File(path);
-      if (!file.existsSync()) return null;
-      final bytes = await file.readAsBytes();
-      unawaited(file.delete().then((_) {}, onError: (_) {}));
-      return bytes.isEmpty ? null : bytes;
+      if (bytes == null || bytes.isEmpty) return null;
+      return bytes;
     } catch (_) {
       return null;
     }

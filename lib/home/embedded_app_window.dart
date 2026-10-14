@@ -1,10 +1,17 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../core/android_core.dart';
+import '../services/icon_service.dart';
 import '../services/native_desktop_windows.dart';
 import '../services/window_manager.dart';
+import '../services/window_thumbnail_service.dart';
+
+/// Global registry of EmbeddedAppWindow states by package name.
+/// DesktopScreen uses this to call setCovered on the right window.
+final Map<String, EmbeddedAppWindowState> embeddedWindowStates = {};
 
 /// A single embedded Android app window.
 ///
@@ -26,10 +33,10 @@ class EmbeddedAppWindow extends StatefulWidget {
   final Size desktop;
 
   @override
-  State<EmbeddedAppWindow> createState() => _EmbeddedAppWindowState();
+  State<EmbeddedAppWindow> createState() => EmbeddedAppWindowState();
 }
 
-class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
+class EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
   final surface = GlobalKey();
   Timer? _retry;
   bool _attached = false;
@@ -37,6 +44,8 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
   String? _error;
   int _attempts = 0;
   Rect? _lastSentRect;
+  bool _covered = false;
+  final Map<String, Future<Uint8List?>> _iconRequests = {};
 
   /// Set when a sync request arrives while one is already in flight; replayed
   /// by the in-flight call's `finally` block.
@@ -48,10 +57,15 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
   int get processId => managed.window.processId;
   String get packageName => managed.packageName;
 
+  // Saved reference to avoid accessing widget in dispose.
+  late final WindowManager _windows;
+
   @override
   void initState() {
     super.initState();
-    widget.core.windows.addListener(_onWindowsChanged);
+    _windows = widget.core.windows;
+    embeddedWindowStates[packageName] = this;
+    _windows.addListener(_onWindowsChanged);
     _startSync();
   }
 
@@ -60,19 +74,32 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.core.windows != widget.core.windows) {
       oldWidget.core.windows.removeListener(_onWindowsChanged);
-      widget.core.windows.addListener(_onWindowsChanged);
+      _windows = widget.core.windows;
+      _windows.addListener(_onWindowsChanged);
     }
   }
 
   @override
   void dispose() {
-    widget.core.windows.removeListener(_onWindowsChanged);
+    embeddedWindowStates.remove(packageName);
+    _windows.removeListener(_onWindowsChanged);
     _retry?.cancel();
     super.dispose();
   }
 
   void _onWindowsChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// Called by DesktopScreen when this window is covered by a panel.
+  /// Shows the last-captured thumbnail instead of hiding the surface.
+  void setCovered(bool covered) {
+    if (_covered == covered) return;
+    setState(() => _covered = covered);
+    if (covered) {
+      // Ensure we have a thumbnail to show.
+      unawaited(WindowThumbnailService.instance.refresh([processId]));
+    }
   }
 
   /// Retries embed after an initial failed attempt, until the native
@@ -125,6 +152,12 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
         if (ok) {
           setState(() => _attached = true);
           _lastSentRect = rect;
+          // The window the user just opened is the focused one; hand it the
+          // keyboard so the first keystroke lands in the Android app instead
+          // of staying on the Flutter view.
+          if (widget.core.windows.focusedPackage == packageName) {
+            unawaited(NativeDesktopWindows.focus(processId));
+          }
           // Attachment succeeded: stop the retry timer permanently.
           _retry?.cancel();
           _retry = null;
@@ -193,7 +226,7 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
       width: width,
       height: height,
       child: Material(
-        elevation: focused ? 18 : 8,
+        elevation: managed.pinned ? 24 : (focused ? 18 : 8),
         color: const Color(0xff151b24),
         borderRadius: BorderRadius.circular(10),
         child: Stack(
@@ -215,6 +248,8 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
                               style: const TextStyle(color: Color(0xFFFF6B6B)),
                             ),
                           )
+                        : _covered
+                        ? _buildCoveredThumbnail()
                         : _attached
                         ? const SizedBox()
                         : const CircularProgressIndicator(),
@@ -222,6 +257,51 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
                 ),
                 _resizeGrip(width, height),
               ],
+            ),
+            // Dedicated corner resize hit zones — placed above edge strips
+            // so diagonal resize works on all four corners.
+            _cornerResize(
+              alignment: Alignment.topLeft,
+              cursor: SystemMouseCursors.resizeUpLeft,
+              onDrag: (delta) {
+                managed.moveTo(
+                  Offset(managed.origin.dx + delta.dx, managed.origin.dy + delta.dy),
+                );
+                managed.resizeTo(
+                  Size(managed.extent.width - delta.dx, managed.extent.height - delta.dy),
+                );
+              },
+            ),
+            _cornerResize(
+              alignment: Alignment.topRight,
+              cursor: SystemMouseCursors.resizeUpRight,
+              onDrag: (delta) {
+                managed.moveTo(
+                  Offset(managed.origin.dx, managed.origin.dy + delta.dy),
+                );
+                managed.resizeTo(
+                  Size(managed.extent.width + delta.dx, managed.extent.height - delta.dy),
+                );
+              },
+            ),
+            _cornerResize(
+              alignment: Alignment.bottomLeft,
+              cursor: SystemMouseCursors.resizeDownLeft,
+              onDrag: (delta) {
+                managed.moveTo(
+                  Offset(managed.origin.dx + delta.dx, managed.origin.dy),
+                );
+                managed.resizeTo(
+                  Size(managed.extent.width - delta.dx, managed.extent.height + delta.dy),
+                );
+              },
+            ),
+            _cornerResize(
+              alignment: Alignment.bottomRight,
+              cursor: SystemMouseCursors.resizeDownRight,
+              onDrag: (delta) => managed.resizeTo(
+                Size(managed.extent.width + delta.dx, managed.extent.height + delta.dy),
+              ),
             ),
             // Slim hit zones inside each border for pointer resizing, in
             // addition to the corner grip below.
@@ -313,6 +393,64 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
     );
   }
 
+  /// A 16x16 invisible hit zone at a window corner for diagonal resizing.
+  Widget _cornerResize({
+    required Alignment alignment,
+    required MouseCursor cursor,
+    required ValueChanged<Offset> onDrag,
+  }) {
+    return Positioned.fill(
+      child: Align(
+        alignment: alignment,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onPanUpdate: (event) => setState(() => onDrag(event.delta)),
+          child: MouseRegion(
+            cursor: cursor,
+            child: const SizedBox(width: 16, height: 16),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Renders the app icon for this window's package.
+  /// Uses the same IconService cache as the desktop launcher.
+  Widget appIcon(AndroidAppInfo app, {double size = 46}) {
+    final key = '${widget.core.devices.deviceId}:${app.packageName}:${app.iconBase64.hashCode}';
+    final request = _iconRequests.putIfAbsent(
+      key,
+      () => IconService.instance.iconFor(app, widget.core.devices.deviceId),
+    );
+    return FutureBuilder<Uint8List?>(
+      future: request,
+      builder: (context, snapshot) => snapshot.data == null
+          ? Icon(Icons.android, size: size)
+          : Image.memory(
+              snapshot.data!,
+              width: size,
+              height: size,
+              errorBuilder: (_, _, _) => Icon(Icons.android, size: size),
+            ),
+    );
+  }
+
+  Widget _buildCoveredThumbnail() {
+    final frame = WindowThumbnailService.instance.frameFor(processId);
+    if (frame == null) {
+      return const Center(
+        child: Icon(Icons.image, size: 40, color: Colors.white24),
+      );
+    }
+    return Image.memory(
+      frame,
+      fit: BoxFit.cover,
+      width: double.infinity,
+      height: double.infinity,
+      opacity: const AlwaysStoppedAnimation(0.6),
+    );
+  }
+
   Widget _titleBar(BuildContext context, Size desktop, WindowManager windows) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -337,8 +475,8 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
         color: const Color(0xff222b38),
         child: Row(
           children: [
-            const Icon(Icons.android, size: 16),
-            const SizedBox(width: 8),
+            appIcon(managed.window.app, size: 14),
+            const SizedBox(width: 6),
             Expanded(
               child: Text(
                 managed.window.app.name,
@@ -347,16 +485,94 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
               ),
             ),
             IconButton(
-              tooltip: 'Snap window left',
-              onPressed: () =>
-                  windows.snap(packageName, WindowSnap.left, desktop),
-              icon: const Icon(Icons.align_horizontal_left, size: 17),
+              tooltip: managed.pinned ? 'Unpin window' : 'Pin on top',
+              onPressed: () => setState(() => windows.togglePin(packageName)),
+              icon: Icon(
+                managed.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+                size: 17,
+                color: managed.pinned
+                    ? Theme.of(context).colorScheme.primary
+                    : null,
+              ),
             ),
-            IconButton(
-              tooltip: 'Snap window right',
-              onPressed: () =>
-                  windows.snap(packageName, WindowSnap.right, desktop),
-              icon: const Icon(Icons.align_horizontal_right, size: 17),
+            PopupMenuButton<WindowSnap>(
+              tooltip: 'Snap layout',
+              icon: const Icon(Icons.dashboard_customize_outlined, size: 17),
+              onSelected: (snap) => windows.snap(packageName, snap, desktop),
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: WindowSnap.left,
+                  child: Row(
+                    children: [
+                      Icon(Icons.align_horizontal_left, size: 16),
+                      SizedBox(width: 8),
+                      Text('Left half'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: WindowSnap.right,
+                  child: Row(
+                    children: [
+                      Icon(Icons.align_horizontal_right, size: 16),
+                      SizedBox(width: 8),
+                      Text('Right half'),
+                    ],
+                  ),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: WindowSnap.topLeft,
+                  child: Row(
+                    children: [
+                      Icon(Icons.north_west, size: 16),
+                      SizedBox(width: 8),
+                      Text('Top-left quarter'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: WindowSnap.topRight,
+                  child: Row(
+                    children: [
+                      Icon(Icons.north_east, size: 16),
+                      SizedBox(width: 8),
+                      Text('Top-right quarter'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: WindowSnap.bottomLeft,
+                  child: Row(
+                    children: [
+                      Icon(Icons.south_west, size: 16),
+                      SizedBox(width: 8),
+                      Text('Bottom-left quarter'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: WindowSnap.bottomRight,
+                  child: Row(
+                    children: [
+                      Icon(Icons.south_east, size: 16),
+                      SizedBox(width: 8),
+                      Text('Bottom-right quarter'),
+                    ],
+                  ),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
+                  value: WindowSnap.maximized,
+                  child: Row(
+                    children: [
+                      Icon(Icons.fullscreen, size: 16),
+                      SizedBox(width: 8),
+                      Text('Maximize full screen'),
+                    ],
+                  ),
+                ),
+              ],
             ),
             IconButton(
               tooltip: managed.maximized ? 'Restore window' : 'Maximize window',
@@ -370,6 +586,13 @@ class _EmbeddedAppWindowState extends State<EmbeddedAppWindow> {
               tooltip: 'Minimize window',
               onPressed: () => windows.minimize(packageName),
               icon: const Icon(Icons.remove, size: 18),
+            ),
+            IconButton(
+              tooltip: 'Back',
+              onPressed: () {
+                unawaited(widget.core.sendShellCommand('input keyevent 4'));
+              },
+              icon: const Icon(Icons.arrow_back, size: 18),
             ),
             IconButton(
               tooltip: 'Close app window',

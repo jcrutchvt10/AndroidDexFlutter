@@ -187,6 +187,17 @@ class DeviceManager extends ChangeNotifier {
     );
   }
 
+  /// Returns the serial to pass to scrcpy's --serial flag, or null to
+  /// let scrcpy auto-detect (safe when only one device is attached).
+  String? get scrcpySerial {
+    if (isUsb) {
+      final usbDevices = _devices.where((d) => d.isConnected && !d.isWifi).toList();
+      if (usbDevices.length == 1) return usbDevices.first.id;
+      return null; // Ambiguous — let scrcpy handle it.
+    }
+    return _deviceId; // Wi-Fi: ip:port
+  }
+
   void reset() {
     _deviceId = usbSelector;
     _needsDeviceSelection = false;

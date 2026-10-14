@@ -239,6 +239,60 @@ class AndroidCore extends ChangeNotifier {
     allConnected.value = all;
   }
 
+  /// Sends an arbitrary shell command through the JAR Runtime.exec channel.
+  Future<Map<String, dynamic>?> sendShellCommand(String command) async {
+    if (_boot == null) return null;
+    return _boot!.sendJarCommand(
+      DexProtocol.jarShell,
+      arguments: {'command': command},
+    );
+  }
+
+  /// Sends a media key event to the device (e.g. 85 play/pause, 87 next, 88 prev).
+  Future<void> sendMediaKey(int keyCode) async {
+    await sendShellCommand('input keyevent $keyCode');
+  }
+
+  /// Sets the volume for a specific audio stream on the device.
+  /// Uses the verified JAR volume.set command.
+  Future<void> setVolume(String streamName, int level) async {
+    try {
+      await _boot!.sendJarCommand(
+        DexProtocol.jarVolumeSet,
+        arguments: {'stream': streamName, 'level': level},
+        timeout: const Duration(seconds: 5),
+      );
+    } catch (error) {
+      DevLog.logError(error, scope: 'volume');
+    }
+  }
+
+  /// Runs an ADB command on the current device target.
+  /// Used for file push and APK install from drag-and-drop.
+  Future<AdbResult> runAdbCommand(List<String> args, {String? failure}) async {
+    return _boot!.runAdb(args, failure: failure);
+  }
+
+  /// Resolves an installed app info by its package name, if present in the catalog.
+  AndroidAppInfo? appForPackage(String packageName) {
+    for (final app in _apps) {
+      if (app.packageName == packageName) return app;
+    }
+    return null;
+  }
+
+  /// Launches or focuses an app by package name.
+  Future<void> launchAppByPackage(String packageName) async {
+    final app = appForPackage(packageName);
+    if (app != null) {
+      await launchApp(app);
+    } else {
+      await sendShellCommand(
+        'monkey -p $packageName -c android.intent.category.LAUNCHER 1',
+      );
+    }
+  }
+
   void updateFromMessage(AndroidCoreMessage message) {
     // Every message may carry the reporting device id; keep it so the desktop
     // can label which handset is attached.
@@ -503,7 +557,12 @@ class AndroidCore extends ChangeNotifier {
 
   Future<void> launchApp(AndroidAppInfo app) async {
     if (_appProcesses.containsKey(app.packageName)) {
-      _launchError = '${app.name} is already open.';
+      windows.focus(app.packageName);
+      final managed = windows.forPackage(app.packageName);
+      if (managed != null) {
+        unawaited(NativeDesktopWindows.focus(managed.window.processId));
+      }
+      _launchError = '';
       notifyListeners();
       return;
     }
@@ -533,11 +592,24 @@ class AndroidCore extends ChangeNotifier {
       final transportSizing = forkRuntime
           ? '--desktop-transport'
           : '--flex-display';
+      final scrcpySerial = devices.scrcpySerial;
       final arguments = [
         scrcpyDisplayArgument(settings.displaySize),
+        if (scrcpySerial != null) '--serial=$scrcpySerial',
         transportSizing,
-        '--render-fit=unscaled',
-        '--display-ime-policy=local',
+        // The scrcpy surface is resized to match its Flutter desktop panel.
+        // Preserve the Android display aspect ratio while fitting it there:
+        // unscaled rendering clips content in smaller panels and leaves it
+        // undersized in larger ones.
+        '--render-fit=letterbox',
+        // Send the host keyboard as a physical HID device. The SDK mixed
+        // mode splits letters into key events and punctuation into text
+        // injection; some Android apps drop the latter and shifted keys.
+        '--keyboard=uhid',
+        // Hide Android's soft keyboard on the mirrored display: text fields
+        // are typed on the host's physical keyboard, so the on-screen IME
+        // would only eat half the window (DISPLAY_IME_POLICY_HIDE, A12+).
+        '--display-ime-policy=hide',
         '--no-vd-system-decorations',
         if (forkRuntime) '--start-app=${app.packageName}',
         '--window-title=Android DEX · ${app.name}',

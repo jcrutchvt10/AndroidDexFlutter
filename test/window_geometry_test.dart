@@ -135,5 +135,44 @@ void main() {
 
       expect(managed.snap, WindowSnap.right);
     });
+
+    test('quarter snaps tile into four quadrants', () {
+      final managed = ManagedWindow(
+        window: window('com.example.app'),
+        origin: const Offset(160, 80),
+        extent: const Size(850, 520),
+      );
+      final desktop = const Size(1200, 800);
+      final usableHeight = 800 - WindowManager.taskbarHeight;
+
+      managed.applySnap(WindowSnap.topLeft, desktop, WindowManager.taskbarHeight);
+      expect(managed.origin, Offset.zero);
+      expect(managed.extent, Size(600, usableHeight / 2));
+
+      managed.applySnap(WindowSnap.topRight, desktop, WindowManager.taskbarHeight);
+      expect(managed.origin, const Offset(600, 0));
+      expect(managed.extent, Size(600, usableHeight / 2));
+
+      managed.applySnap(WindowSnap.bottomLeft, desktop, WindowManager.taskbarHeight);
+      expect(managed.origin, Offset(0, usableHeight / 2));
+      expect(managed.extent, Size(600, usableHeight / 2));
+
+      managed.applySnap(WindowSnap.bottomRight, desktop, WindowManager.taskbarHeight);
+      expect(managed.origin, Offset(600, usableHeight / 2));
+      expect(managed.extent, Size(600, usableHeight / 2));
+    });
+
+    test('pinning toggles and can be initialized', () {
+      final managed = ManagedWindow(
+        window: window('com.example.app'),
+        origin: const Offset(160, 80),
+        extent: const Size(850, 520),
+      );
+      expect(managed.pinned, isFalse);
+      managed.togglePin();
+      expect(managed.pinned, isTrue);
+      managed.togglePin();
+      expect(managed.pinned, isFalse);
+    });
   });
 }

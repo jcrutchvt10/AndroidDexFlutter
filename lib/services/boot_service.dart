@@ -171,6 +171,11 @@ class BootService {
     }
   }
 
+  /// Public: runs an ADB command on the current device target.
+  /// Used by AndroidCore.runAdbCommand for drag-and-drop file operations.
+  Future<AdbResult> runAdb(List<String> args, {String? failure}) =>
+      _adb(args, failure: failure);
+
   /// Tears the attempt down so a retry starts from a clean state.
   ///
   /// Without this a retry re-binds ports 3698-3701 that the previous attempt

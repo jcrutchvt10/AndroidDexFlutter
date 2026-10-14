@@ -15,6 +15,7 @@ analyzer:
     - windows/**
     # Vendored Flutter SDK checkout (git-ignored) must not be analyzed.
     - tools/flutter/**
+    - android/**
 
 linter:
   # The lint rules applied to this project can be customized in the

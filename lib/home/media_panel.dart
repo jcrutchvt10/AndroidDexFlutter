@@ -129,15 +129,76 @@ class MediaPanel extends StatelessWidget {
                 ],
               ),
             ],
-            const SizedBox(height: 24),
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.08),
+                ),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: 'Previous track',
+                        iconSize: 32,
+                        icon: const Icon(Icons.skip_previous),
+                        onPressed: () => core.sendMediaKey(88),
+                      ),
+                      const SizedBox(width: 12),
+                      IconButton(
+                        tooltip: session.playing ? 'Pause' : 'Play',
+                        iconSize: 48,
+                        color: Theme.of(context).colorScheme.primary,
+                        icon: Icon(
+                          session.playing
+                              ? Icons.pause_circle_filled
+                              : Icons.play_circle_filled,
+                        ),
+                        onPressed: () => core.sendMediaKey(85),
+                      ),
+                      const SizedBox(width: 12),
+                      IconButton(
+                        tooltip: 'Next track',
+                        iconSize: 32,
+                        icon: const Icon(Icons.skip_next),
+                        onPressed: () => core.sendMediaKey(87),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton(
+                        tooltip: 'Volume down',
+                        icon: const Icon(Icons.volume_down, size: 20),
+                        onPressed: () => core.sendMediaKey(25),
+                      ),
+                      const SizedBox(width: 24),
+                      IconButton(
+                        tooltip: 'Volume up',
+                        icon: const Icon(Icons.volume_up, size: 20),
+                        onPressed: () => core.sendMediaKey(24),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
             Text(
-              source != null
-                  ? 'Transport controls are handled on the device — the '
-                        'shipped service exposes no play/pause command. '
-                        'Use the handset, or open the app and control it here.'
-                  : 'Playback controls are handled on the device. Use the '
-                        'transport controls on the handset.',
-              style: const TextStyle(fontSize: 12),
+              'Transport commands are routed to the connected Android device via ADB media keyevents.',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+              ),
             ),
           ],
         );

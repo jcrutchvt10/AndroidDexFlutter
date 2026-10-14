@@ -58,6 +58,7 @@ class NotificationPanel extends StatelessWidget {
                       items: entry.value,
                       onClear: () => manager.clearPackage(entry.key),
                       onDismiss: manager.remove,
+                      onOpen: core.launchAppByPackage,
                     ),
                 ],
               ),
@@ -75,12 +76,14 @@ class _PackageGroup extends StatelessWidget {
     required this.items,
     required this.onClear,
     required this.onDismiss,
+    required this.onOpen,
   });
 
   final String packageName;
   final List<DexNotification> items;
   final VoidCallback onClear;
   final void Function(String key) onDismiss;
+  final void Function(String packageName) onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -105,6 +108,11 @@ class _PackageGroup extends StatelessWidget {
                 ),
                 Text('${items.length}', style: theme.textTheme.bodySmall),
                 IconButton(
+                  tooltip: 'Open $packageName',
+                  onPressed: () => onOpen(packageName),
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                ),
+                IconButton(
                   tooltip: 'Clear all from $packageName',
                   onPressed: onClear,
                   icon: const Icon(Icons.close, size: 16),
@@ -115,6 +123,8 @@ class _PackageGroup extends StatelessWidget {
           for (final item in items)
             ListTile(
               dense: true,
+              onTap: () => onOpen(packageName),
+              mouseCursor: SystemMouseCursors.click,
               leading: Icon(
                 item.ongoing ? Icons.sync : Icons.circle_notifications_outlined,
                 size: 20,

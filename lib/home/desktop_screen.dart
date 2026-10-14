@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
@@ -58,6 +57,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
   final Map<String, int> _windowWorkspaces = {};
   final Map<String, Future<Uint8List?>> _iconRequests = {};
   static const _workspaceNames = ['Desktop', 'Work', 'Media', 'Personal'];
+  bool _volumePopupOpen = false;
   int _selectedWorkspace = 0;
   bool _previewOpen = false;
   Timer? _persistTimer;
@@ -96,7 +96,21 @@ class _DesktopScreenState extends State<DesktopScreen> {
       if (core.apkConnectedValue) core.refreshApps();
       _focusNode.requestFocus();
       _toastBridge = NotificationToastBridge(core);
-      core.windows.addListener(_onWindowsChanged);
+        core.windows.addListener(_onWindowsChanged);
+        // When a click lands on an embedded scrcpy surface, C++ notifies us
+        // so WindowManager.focus() stays in sync with the actual Win32 focus.
+        NativeDesktopWindows.onSurfaceClicked = (processId) {
+          for (final w in core.windows.ordered) {
+            if (w.window.processId == processId) {
+              core.windows.focus(w.packageName);
+              break;
+            }
+          }
+        };
+        // Handle files dropped on the host window.
+        NativeDesktopWindows.onFilesDropped = (paths) {
+          _handleDroppedFiles(paths);
+        };
     });
   }
 
@@ -126,6 +140,8 @@ class _DesktopScreenState extends State<DesktopScreen> {
 
   @override
   void dispose() {
+    NativeDesktopWindows.onSurfaceClicked = null;
+    NativeDesktopWindows.onFilesDropped = null;
     _timer?.cancel();
     _persistTimer?.cancel();
     _focusNode.dispose();
@@ -163,8 +179,12 @@ class _DesktopScreenState extends State<DesktopScreen> {
     }));
   }
 
-  void toggle(String value) =>
-      setState(() => panel = panel == value ? null : value);
+  void toggle(String value) {
+    if (_volumePopupOpen && value != 'Volume') {
+      setState(() => _volumePopupOpen = false);
+    }
+    setState(() => panel = panel == value ? null : value);
+  }
 
   /// Validates a game-mode gesture and forwards it to the device.
   ///
@@ -206,6 +226,8 @@ class _DesktopScreenState extends State<DesktopScreen> {
   }
 
   /// Keep native surfaces in sync with the current host workspace and panel.
+  /// When a window is covered by a panel, show its cached thumbnail instead
+  /// of hiding the native surface entirely (which would show a black void).
   void _updateCoveredSurfaces(Rect? panelRect) {
     final covered = <String>{};
     for (final managed in core.windows.ordered) {
@@ -229,14 +251,76 @@ class _DesktopScreenState extends State<DesktopScreen> {
           managed.window.processId,
           surfacesVisible && !isCovered,
         );
+        // Tell the EmbeddedAppWindow to show/hide its cached thumbnail.
+        final element = context.findRenderObject();
+        if (element is RenderObject) {
+          // Walk down to find the EmbeddedAppWindow state for this package.
+          _findEmbeddedWindowState(managed.packageName)?.setCovered(
+            surfacesVisible ? isCovered : true,
+          );
+        }
       }
     }
+  }
+
+  /// Finds the EmbeddedAppWindow State for a given package using the
+  /// global registry. Returns null if not found.
+  EmbeddedAppWindowState? _findEmbeddedWindowState(String packageName) {
+    return embeddedWindowStates[packageName];
   }
 
   void _switchWorkspace(int index) {
     if (index < 0 || index >= _workspaceNames.length || index == _selectedWorkspace) return;
     setState(() => _selectedWorkspace = index);
     core.settings.setSelectedWorkspace(index);
+  }
+
+  /// Handles files dropped on the host window.
+  /// APKs are installed via `adb install -r`.
+  /// Other files are pushed to `/sdcard/Download/`.
+  Future<void> _handleDroppedFiles(List<String> paths) async {
+    for (final path in paths) {
+      final lower = path.toLowerCase();
+      if (lower.endsWith('.apk')) {
+        _showSnack('Installing ${path.split('/').last}…');
+        try {
+          final result = await core.runAdbCommand(
+            [...core.devices.adbArgs, 'install', '-r', path],
+            failure: 'APK install failed',
+          );
+          if (result.success) {
+            _showSnack('${path.split('/').last} installed successfully');
+          } else {
+            _showSnack('Failed to install ${path.split('/').last}');
+          }
+        } catch (e) {
+          _showSnack('Install error: $e');
+        }
+      } else {
+        final fileName = path.split(RegExp(r'[\\/]')).last;
+        _showSnack('Pushing $fileName to device…');
+        try {
+          final result = await core.runAdbCommand(
+            [...core.devices.adbArgs, 'push', path, '/sdcard/Download/$fileName'],
+            failure: 'File push failed',
+          );
+          if (result.success) {
+            _showSnack('$fileName pushed to /sdcard/Download/');
+          } else {
+            _showSnack('Failed to push $fileName');
+          }
+        } catch (e) {
+          _showSnack('Push error: $e');
+        }
+      }
+    }
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
+    );
   }
 
   // --- Shortcuts ---------------------------------------------------------
@@ -416,7 +500,10 @@ class _DesktopScreenState extends State<DesktopScreen> {
                   ),
                   _desktopIcons(compact),
                   if (!fullscreen) _clock(),
-                  for (final managed in core.windows.ordered)
+                  for (final managed in [
+                    ...core.windows.ordered.where((w) => !w.pinned),
+                    ...core.windows.ordered.where((w) => w.pinned),
+                  ])
                     if (_workspaceFor(managed.packageName) == _selectedWorkspace)
                       EmbeddedAppWindow(
                         key: ValueKey(managed.packageName),
@@ -539,6 +626,21 @@ class _DesktopScreenState extends State<DesktopScreen> {
     ),
   );
 
+  /// Returns the apps to show on the desktop: pinned apps first, then
+  /// fill remaining slots with alphabetically-first apps.
+  List<AndroidAppInfo> _desktopApps() {
+    final pinned = core.apps
+        .where((a) => core.settings.pinnedDesktopPackages.contains(a.packageName))
+        .toList();
+    final unpinned = core.apps
+        .where((a) => !core.settings.pinnedDesktopPackages.contains(a.packageName))
+        .toList();
+    return [
+      ...pinned,
+      ...unpinned.take(12 - pinned.length),
+    ];
+  }
+
   Widget _desktopIcons(bool compact) => Positioned(
     left: 20,
     top: 20,
@@ -621,7 +723,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
                   Image.asset('$_assets/dex_apps/settings.png', width: 46),
                   () => toggle('Settings'),
                 ),
-                for (final app in core.apps.take(12))
+                for (final app in _desktopApps())
                   tile(app.name, appIcon(app), () => launch(app)),
               ],
             ),
@@ -678,6 +780,83 @@ class _DesktopScreenState extends State<DesktopScreen> {
     ),
   );
 
+  Widget _volumeButton() {
+    return PopupMenuButton<String>(
+      tooltip: 'Volume',
+      offset: const Offset(0, -120),
+      onOpened: () => setState(() => _volumePopupOpen = true),
+      onCanceled: () => setState(() => _volumePopupOpen = false),
+      itemBuilder: (context) => [
+        PopupMenuItem(
+          enabled: false,
+          child: SizedBox(
+            width: 220,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _volumeSlider('Media', 'STREAM_MUSIC'),
+                _volumeSlider('Ring', 'STREAM_RING'),
+                _volumeSlider('Notifications', 'STREAM_NOTIFICATION'),
+                _volumeSlider('Alarm', 'STREAM_ALARM'),
+              ],
+            ),
+          ),
+        ),
+      ],
+      child: Icon(
+        _volumeIcon(),
+        size: 21,
+        color: Colors.white,
+      ),
+    );
+  }
+
+  IconData _volumeIcon() {
+    final mediaMax = core.volumeMax('STREAM_MUSIC');
+    if (mediaMax <= 0) return Icons.volume_mute;
+    final mediaCur = core.volumeCurrent('STREAM_MUSIC');
+    if (mediaCur <= 0) return Icons.volume_mute;
+    if (mediaCur < mediaMax * 0.3) return Icons.volume_down;
+    if (mediaCur < mediaMax * 0.7) return Icons.volume_up;
+    return Icons.volume_up;
+  }
+
+  Widget _volumeSlider(String label, String streamName) {
+    final max = core.volumeMax(streamName);
+    final current = core.volumeCurrent(streamName);
+    final available = core.volumeAvailable(streamName);
+    if (!available || max <= 0) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Text('$label: unavailable',
+            style: const TextStyle(fontSize: 12, color: Colors.white54)),
+      );
+    }
+    return Row(
+      children: [
+        SizedBox(
+          width: 80,
+          child: Text(label, style: const TextStyle(fontSize: 12)),
+        ),
+        Expanded(
+          child: Slider(
+            value: current.clamp(0, max).toDouble(),
+            min: 0,
+            max: max.toDouble(),
+            onChanged: (v) {
+              core.setVolume(streamName, v.round());
+            },
+          ),
+        ),
+        SizedBox(
+          width: 30,
+          child: Text('${(current / max * 100).round()}%',
+              style: const TextStyle(fontSize: 10, color: Colors.white54)),
+        ),
+      ],
+    );
+  }
+
   Widget _taskbar(Size desktop, bool compact) => Positioned(
       left: 12,
       right: 12,
@@ -714,6 +893,24 @@ class _DesktopScreenState extends State<DesktopScreen> {
             ),
           ),
           const SizedBox(width: 8),
+          // Pinned taskbar apps (left side, before running apps).
+          if (core.apps.any((a) =>
+              core.settings.pinnedTaskbarPackages.contains(a.packageName)))
+            Glass(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final app in core.apps
+                      .where((a) => core.settings.pinnedTaskbarPackages.contains(a.packageName)))
+                    IconButton(
+                      tooltip: 'Launch ${app.name}',
+                      onPressed: () => launch(app),
+                      icon: appIcon(app, size: 20),
+                    ),
+                ],
+              ),
+            ),
+          const SizedBox(width: 8),
           // Running windows: clicking focuses, clicking the icon
           // block again minimises.
           if (core.windows.ordered.any(
@@ -740,7 +937,7 @@ class _DesktopScreenState extends State<DesktopScreen> {
                                     unawaited(NativeDesktopWindows.focus(managed.window.processId));
                                   }
                                 },
-                                icon: Icon(managed.minimized ? Icons.minimize : Icons.crop_square, size: 15),
+                                icon: appIcon(managed.window.app, size: 16),
                                 label: Text(managed.window.app.name, style: const TextStyle(fontSize: 12)),
                               ),
                               PopupMenuButton<int>(
@@ -789,11 +986,12 @@ class _DesktopScreenState extends State<DesktopScreen> {
                   fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen (${core.settings.shortcutFor('fullscreen')})',
                   () => _toggleFullscreen(!fullscreen),
                 ),
-                button(
-                  Icons.help_outline,
-                  'Keyboard shortcuts (${core.settings.shortcutFor('help')})',
-                  () => toggle('Shortcuts'),
-                ),
+                if (!compact)
+                  button(
+                    Icons.help_outline,
+                    'Keyboard shortcuts (${core.settings.shortcutFor('help')})',
+                    () => toggle('Shortcuts'),
+                  ),
               ],
             ),
           ),
@@ -801,6 +999,8 @@ class _DesktopScreenState extends State<DesktopScreen> {
           Glass(
             child: Row(
               children: [
+                // Volume control with popup sliders.
+                if (!compact) _volumeButton(),
                 button(
                   core.wifi ? Icons.wifi : Icons.usb,
                   'Device',
@@ -818,11 +1018,12 @@ class _DesktopScreenState extends State<DesktopScreen> {
                   'Settings',
                   () => toggle('Settings'),
                 ),
-                button(
-                  Icons.games,
-                  'Gaming',
-                  () => setState(() => gameMode = !gameMode),
-                ),
+                if (!compact)
+                  button(
+                    Icons.games,
+                    'Gaming',
+                    () => setState(() => gameMode = !gameMode),
+                  ),
                 Padding(
                   padding: const EdgeInsets.all(10),
                   child: Text(
@@ -1291,24 +1492,19 @@ class _SettingsHeading extends StatelessWidget {
   );
 }
 
-/// Gamepad tokens the JAR `input` sub-command understands.
+/// Gamepad tokens that map to real Android `input keyevent` commands.
 ///
-/// The overlay builds these names from `game_profiles.json`, a user-editable
-/// file on disk. Matching against a closed set means a malformed or stale
-/// profile produces a dropped gesture and a log line, rather than an
-/// arbitrary string being spliced into the device command.
-const _gameInputTokens = <String>{
-  'dpad_up',
-  'dpad_down',
-  'dpad_left',
-  'dpad_right',
-  'joystick',
-  'joystick_release',
-  'tapspot_toggle',
-  'tapspot_turbo',
+/// Android's /system/bin/input only supports: text, keyevent, tap, swipe,
+/// draganddrop, roll, motionevent. The old code generated fake subcommands
+/// like 'input dpad_up' which Android silently ignores.
+const _gameKeyEvents = <String, String>{
+  'dpad_up': 'KEYCODE_DPAD_UP',
+  'dpad_down': 'KEYCODE_DPAD_DOWN',
+  'dpad_left': 'KEYCODE_DPAD_LEFT',
+  'dpad_right': 'KEYCODE_DPAD_RIGHT',
 };
 
-/// Action buttons are named per game (`A`, `B`, `X`, `Y`, …), so they are
+/// Action buttons are named per game (`A`, `B`, `X`, `Y`, ...), so they are
 /// matched as `button_<name>` where `<name>` is a short alphanumeric token.
 final _gameButtonPattern = RegExp(r'^button_[A-Za-z0-9]{1,12}$');
 
@@ -1316,15 +1512,38 @@ final _gameButtonPattern = RegExp(r'^button_[A-Za-z0-9]{1,12}$');
 ///
 /// Returns `null` when [action] is not a known token, which is the signal to
 /// drop the gesture rather than forward it.
+///
+/// D-pad directions use `input keyevent`. Buttons and joystick use
+/// `input tap` / `input motionevent` with device-space coordinates.
 String? gameInputCommand(String action, {double? x, double? y}) {
-  final known =
-      _gameInputTokens.contains(action) || _gameButtonPattern.hasMatch(action);
-  if (!known) return null;
-  // Axis values are device floats; format them so the token stays a plain
-  // pair of numbers regardless of locale or exponent formatting.
-  String axis(double value) => value.clamp(-1.0, 1.0).toStringAsFixed(4);
-  final suffix = x != null && y != null ? ' ${axis(x)} ${axis(y)}' : '';
-  return 'input $action$suffix';
+  // D-pad: map to real Android keycodes.
+  final keycode = _gameKeyEvents[action];
+  if (keycode != null) {
+    return 'input keyevent $keycode';
+  }
+  // Joystick: motionevent with normalized axis values.
+  if (action == 'joystick' && x != null && y != null) {
+    final nx = x.clamp(-1.0, 1.0).toStringAsFixed(4);
+    final ny = y.clamp(-1.0, 1.0).toStringAsFixed(4);
+    return 'input motionevent MOVE $nx $ny';
+  }
+  if (action == 'joystick_release') {
+    return 'input motionevent UP';
+  }
+  // Action buttons: tap at the device-space coordinates stored in the profile.
+  if (_gameButtonPattern.hasMatch(action) && x != null && y != null) {
+    final tx = x.round().clamp(0, 9999);
+    final ty = y.round().clamp(0, 9999);
+    return 'input tap $tx $ty';
+  }
+  // Tap spot toggles: send as keyevents (map to volume keys as a fallback).
+  if (action == 'tapspot_toggle') {
+    return 'input keyevent ${(x ?? 0) > 0 ? 'KEYCODE_VOLUME_UP' : 'KEYCODE_VOLUME_DOWN'}';
+  }
+  if (action == 'tapspot_turbo') {
+    return 'input keyevent ${(x ?? 0) > 0 ? 'KEYCODE_VOLUME_UP' : 'KEYCODE_VOLUME_DOWN'}';
+  }
+  return null;
 }
 
 /// A blurred, translucent panel used for every desktop surface.

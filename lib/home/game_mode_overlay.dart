@@ -220,8 +220,8 @@ class _JoystickWidgetState extends State<_JoystickWidget> {
       left: widget.center.dx - widget.radius,
       top: widget.center.dy - widget.radius,
       child: GestureDetector(
-        onPanStart: (_) => _handleMove(Offset.zero),
-        onPanUpdate: (event) => _handleMove(event.delta),
+        onPanStart: (details) => _handleMove(details.localPosition),
+        onPanUpdate: (details) => _handleMove(details.localPosition),
         onPanEnd: (_) {
           setState(() => _stickOffset = Offset.zero);
           widget.onRelease();
@@ -257,10 +257,14 @@ class _JoystickWidgetState extends State<_JoystickWidget> {
     );
   }
 
-  void _handleMove(Offset delta) {
+  void _handleMove(Offset localPosition) {
+    // localPosition is relative to the joystick widget's top-left corner.
+    // Center of the joystick is at (radius, radius).
+    final center = Offset(widget.radius, widget.radius);
+    final offset = localPosition - center;
     final maxDist = widget.radius - 16;
-    final dist = delta.distance;
-    final clamped = dist > maxDist ? delta * (maxDist / dist) : delta;
+    final dist = offset.distance;
+    final clamped = dist > maxDist ? offset * (maxDist / dist) : offset;
     setState(() => _stickOffset = clamped);
     final normalizedDx = clamped.dx / maxDist;
     final normalizedDy = clamped.dy / maxDist;

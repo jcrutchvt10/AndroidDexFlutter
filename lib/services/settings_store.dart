@@ -59,6 +59,8 @@ class SettingsStore extends ChangeNotifier {
 
   Map<String, Map<String, num>> _windowStates = {};
   int _selectedWorkspace = 0;
+  List<String> _pinnedDesktopPackages = [];
+  List<String> _pinnedTaskbarPackages = [];
 
   int get wallpaper => _wallpaper;
   String get lastDevice => _lastDevice;
@@ -82,6 +84,39 @@ class SettingsStore extends ChangeNotifier {
 
   Map<String, num>? windowStateFor(String packageName) =>
       _windowStates[packageName];
+
+  List<String> get pinnedDesktopPackages => List.unmodifiable(_pinnedDesktopPackages);
+  List<String> get pinnedTaskbarPackages => List.unmodifiable(_pinnedTaskbarPackages);
+
+  void setPinnedDesktopPackage(String packageName, bool pinned) {
+    if (pinned) {
+      if (!_pinnedDesktopPackages.contains(packageName)) {
+        _pinnedDesktopPackages.add(packageName);
+        notifyListeners();
+        _scheduleSave();
+      }
+    } else {
+      if (_pinnedDesktopPackages.remove(packageName)) {
+        notifyListeners();
+        _scheduleSave();
+      }
+    }
+  }
+
+  void setPinnedTaskbarPackage(String packageName, bool pinned) {
+    if (pinned) {
+      if (!_pinnedTaskbarPackages.contains(packageName)) {
+        _pinnedTaskbarPackages.add(packageName);
+        notifyListeners();
+        _scheduleSave();
+      }
+    } else {
+      if (_pinnedTaskbarPackages.remove(packageName)) {
+        notifyListeners();
+        _scheduleSave();
+      }
+    }
+  }
 
   void setWindowState(String packageName, Map<String, num> state) {
     _windowStates[packageName] = state;
@@ -159,6 +194,14 @@ class SettingsStore extends ChangeNotifier {
             e.key: Map<String, num>.from(e.value as Map<String, dynamic>),
         };
       }
+      final pinDesk = json['pinned_desktop_packages'];
+      if (pinDesk is List) {
+        _pinnedDesktopPackages = pinDesk.whereType<String>().toList();
+      }
+      final pinTask = json['pinned_taskbar_packages'];
+      if (pinTask is List) {
+        _pinnedTaskbarPackages = pinTask.whereType<String>().toList();
+      }
       notifyListeners();
     } catch (error) {
       DevLog.logError(error, scope: 'settings');
@@ -196,7 +239,9 @@ class SettingsStore extends ChangeNotifier {
     if (!_shortcutChords.containsKey(action) ||
         !ShortcutBindings.keys.containsKey(chord) ||
         _shortcutChords.entries.any((entry) => entry.key != action && entry.value == chord) ||
-        _shortcutChords[action] == chord) return;
+        _shortcutChords[action] == chord) {
+      return;
+    }
     _shortcutChords[action] = chord;
     notifyListeners();
     await _save();
@@ -299,6 +344,8 @@ class SettingsStore extends ChangeNotifier {
         'turn_screen_off': _turnScreenOff,
         'display_size': _displaySize,
         'window_states': _windowStates,
+        'pinned_desktop_packages': _pinnedDesktopPackages,
+        'pinned_taskbar_packages': _pinnedTaskbarPackages,
       });
       // Write-then-rename: a crash mid-write leaves the previous file intact.
       final temp = File(p.join(file.parent.path, '$_fileName.tmp'));

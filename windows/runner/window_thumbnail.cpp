@@ -2,10 +2,19 @@
 
 #include <objbase.h>
 
-#include <cstdio>
+#include <windows.h>
+
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace window_thumbnail {
 namespace {
+
+/// Maximum thumbnail width in pixels. The Recents panel displays thumbnails
+/// at 260x200 and workspace previews at 200x150, so 320 px gives headroom
+/// for high-DPI displays without wasting encode time on full-resolution output.
+constexpr UINT kMaxThumbnailWidth = 320;
 
 /// Minimal COM pointer wrapper: this target builds with `_HAS_EXCEPTIONS=0`,
 /// so no RAII type from the STL that may throw can be used.
@@ -36,55 +45,42 @@ class ComPtr {
   T* ptr_ = nullptr;
 };
 
-/// Temp file the Dart side reads and then deletes.
-std::string TempPngPath(HWND hwnd) {
-  char temp_dir[MAX_PATH] = {};
-  const DWORD length = GetTempPathA(MAX_PATH, temp_dir);
-  if (length == 0 || length >= MAX_PATH) return std::string();
+/// Read all bytes from an IStream into a vector.
+std::vector<uint8_t> ReadStreamBytes(IStream* stream) {
+  if (stream == nullptr) return {};
 
-  char file_name[80] = {};
-  const unsigned long long owner =
-      static_cast<unsigned long long>(GetCurrentProcessId());
-  const unsigned long long handle =
-      static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(hwnd));
-  _snprintf_s(file_name, sizeof(file_name), _TRUNCATE,
-              "androiddex-thumb-%llu-%llu.png", owner, handle);
+  // Reset stream position to the beginning.
+  LARGE_INTEGER zero = {};
+  stream->Seek(zero, STREAM_SEEK_SET, nullptr);
 
-  std::string path(temp_dir);
-  path += file_name;
-  return path;
-}
-
-std::wstring Widen(const std::string& value) {
-  if (value.empty()) return std::wstring();
-  const int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(),
-                                       static_cast<int>(value.size()), nullptr,
-                                       0);
-  if (size <= 0) return std::wstring();
-  std::wstring wide(static_cast<size_t>(size), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()),
-                      &wide[0], size);
-  return wide;
+  std::vector<uint8_t> result;
+  BYTE buffer[8192];
+  ULONG bytes_read = 0;
+  HRESULT hr = S_OK;
+  while (SUCCEEDED(hr = stream->Read(buffer, sizeof(buffer), &bytes_read)) &&
+         bytes_read > 0) {
+    result.insert(result.end(), buffer, buffer + bytes_read);
+  }
+  return result;
 }
 
 }  // namespace
 
-std::string CaptureToPng(HWND hwnd) {
-  if (hwnd == nullptr || !IsWindow(hwnd)) return std::string();
+std::vector<uint8_t> CaptureToPng(HWND hwnd) {
+  if (hwnd == nullptr || !IsWindow(hwnd)) return {};
 
   RECT rect = {};
-  if (!GetClientRect(hwnd, &rect)) return std::string();
+  if (!GetClientRect(hwnd, &rect)) return {};
   const int width = rect.right - rect.left;
   const int height = rect.bottom - rect.top;
-  if (width <= 0 || height <= 0) return std::string();
+  if (width <= 0 || height <= 0) return {};
 
-  // The Flutter side scales the preview down for display; capturing at the
-  // native size keeps text legible and avoids a resample on the capture path.
+  // Capture the window into a DIB section.
   const HDC screen_dc = GetDC(nullptr);
-  if (screen_dc == nullptr) return std::string();
+  if (screen_dc == nullptr) return {};
   const HDC memory_dc = CreateCompatibleDC(screen_dc);
   ReleaseDC(nullptr, screen_dc);
-  if (memory_dc == nullptr) return std::string();
+  if (memory_dc == nullptr) return {};
 
   BITMAPINFO info = {};
   info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -99,7 +95,7 @@ std::string CaptureToPng(HWND hwnd) {
                                           &bits, nullptr, 0);
   if (bitmap == nullptr || bits == nullptr) {
     DeleteDC(memory_dc);
-    return std::string();
+    return {};
   }
 
   const HGDIOBJ previous = SelectObject(memory_dc, bitmap);
@@ -109,82 +105,126 @@ std::string CaptureToPng(HWND hwnd) {
 
   if (!captured) {
     DeleteObject(bitmap);
-    return std::string();
-  }
-
-  const std::string path = TempPngPath(hwnd);
-  if (path.empty()) {
-    DeleteObject(bitmap);
-    return std::string();
+    return {};
   }
 
   // Harmless if the engine already initialised COM on this thread.
   const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  std::vector<uint8_t> result;
+  UINT thumb_width = static_cast<UINT>(width);
+  UINT thumb_height = static_cast<UINT>(height);
+
   ComPtr<IWICImagingFactory> factory;
   HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
                                 CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(factory.put()));
-  if (FAILED(hr)) {
-    DeleteObject(bitmap);
-    if (SUCCEEDED(com)) CoUninitialize();
-    return std::string();
-  }
-
-  ComPtr<IWICStream> stream;
-  hr = factory->CreateStream(stream.put());
-  if (SUCCEEDED(hr)) {
-    hr = stream->InitializeFromFilename(Widen(path).c_str(), GENERIC_WRITE);
-  }
-
-  ComPtr<IWICBitmapEncoder> encoder;
-  if (SUCCEEDED(hr)) {
-    hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr,
-                                encoder.put());
-  }
-  if (SUCCEEDED(hr)) {
-    hr = encoder->Initialize(stream.get(), WICBitmapEncoderNoCache);
-  }
-
-  ComPtr<IWICBitmapFrameEncode> frame;
-  ComPtr<IPropertyBag2> properties;
-  if (SUCCEEDED(hr)) {
-    hr = encoder->CreateNewFrame(frame.put(), properties.put());
-  }
-  if (SUCCEEDED(hr)) hr = frame->Initialize(properties.get());
-  if (SUCCEEDED(hr)) {
-    hr = frame->SetSize(static_cast<UINT>(width),
-                        static_cast<UINT>(height));
-  }
-
-  WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-  if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
 
   if (SUCCEEDED(hr)) {
-    const UINT stride = static_cast<UINT>(width) * 4u;
-    const UINT buffer_size = stride * static_cast<UINT>(height);
-    hr = frame->WritePixels(static_cast<UINT>(height), stride, buffer_size,
-                            static_cast<BYTE*>(bits));
+    // Create a WIC bitmap from the captured HBITMAP.
+    ComPtr<IWICBitmap> source_bitmap;
+    hr = factory->CreateBitmapFromHBITMAP(bitmap, nullptr,
+                                          WICBitmapIgnoreAlpha,
+                                          source_bitmap.put());
+
+    // Downscale to thumbnail dimensions before encoding.
+    if (SUCCEEDED(hr)) {
+      thumb_width = static_cast<UINT>(width);
+      thumb_height = static_cast<UINT>(height);
+      if (thumb_width > kMaxThumbnailWidth) {
+        thumb_width = kMaxThumbnailWidth;
+        thumb_height = static_cast<UINT>(
+            static_cast<double>(height) * kMaxThumbnailWidth / width);
+      }
+
+      ComPtr<IWICBitmapScaler> scaler;
+      hr = factory->CreateBitmapScaler(scaler.put());
+      if (SUCCEEDED(hr)) {
+        hr = scaler->Initialize(source_bitmap.get(), thumb_width,
+                                thumb_height);
+      }
+
+      if (SUCCEEDED(hr)) {
+        // Encode directly to an in-memory IStream -- no temp file I/O.
+        ComPtr<IStream> stream;
+        hr = CreateStreamOnHGlobal(nullptr, TRUE, stream.put());
+        if (SUCCEEDED(hr)) {
+          ComPtr<IWICBitmapEncoder> encoder;
+          if (SUCCEEDED(hr)) {
+            hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr,
+                                        encoder.put());
+          }
+          if (SUCCEEDED(hr)) {
+            hr = encoder->Initialize(stream.get(), WICBitmapEncoderNoCache);
+          }
+
+          ComPtr<IWICBitmapFrameEncode> frame;
+          ComPtr<IPropertyBag2> properties;
+          if (SUCCEEDED(hr)) {
+            hr = encoder->CreateNewFrame(frame.put(), properties.put());
+          }
+          if (SUCCEEDED(hr)) hr = frame->Initialize(properties.get());
+          if (SUCCEEDED(hr)) {
+            hr = frame->SetSize(thumb_width, thumb_height);
+          }
+
+          WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+          if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
+
+          // Copy scaled pixels via a lock on the scaler's output bitmap.
+          if (SUCCEEDED(hr)) {
+            ComPtr<IWICBitmap> scaled_bitmap;
+            hr = factory->CreateBitmapFromSource(
+                scaler.get(), WICBitmapCacheOnDemand, scaled_bitmap.put());
+            if (SUCCEEDED(hr) && scaled_bitmap.get() != nullptr) {
+              WICRect lock_rect = {
+                  0, 0, static_cast<INT>(thumb_width),
+                  static_cast<INT>(thumb_height)};
+              ComPtr<IWICBitmapLock> lock;
+              hr = scaled_bitmap->Lock(&lock_rect, WICBitmapLockRead,
+                                       lock.put());
+              if (SUCCEEDED(hr) && lock.get() != nullptr) {
+                UINT data_size = 0;
+                UINT stride = 0;
+                BYTE* data = nullptr;
+                hr = lock->GetDataPointer(&data_size, &data);
+                if (SUCCEEDED(hr)) {
+                  hr = lock->GetStride(&stride);
+                }
+                if (SUCCEEDED(hr) && data != nullptr) {
+                  hr = frame->WritePixels(thumb_height, stride, data_size,
+                                         data);
+                }
+                // IWICBitmapLock is released by resetting the ComPtr.
+                lock.reset();
+              }
+            }
+          }
+
+          if (SUCCEEDED(hr)) hr = frame->Commit();
+          if (SUCCEEDED(hr)) hr = encoder->Commit();
+
+          // Read the PNG bytes from the memory stream.
+          if (SUCCEEDED(hr) && stream.get() != nullptr) {
+            result = ReadStreamBytes(stream.get());
+          }
+
+          // Release encoder chain before stream is freed.
+          frame.reset();
+          properties.reset();
+          encoder.reset();
+        }
+      }
+    }
   }
 
-  if (SUCCEEDED(hr)) hr = frame->Commit();
-  if (SUCCEEDED(hr)) hr = encoder->Commit();
-
-  // Drop the encoder chain so the Dart side can open the file immediately.
-  frame.reset();
-  properties.reset();
-  encoder.reset();
-  stream.reset();
+  // Release COM objects.
   factory.reset();
 
   DeleteObject(bitmap);
   if (SUCCEEDED(com)) CoUninitialize();
 
-  if (FAILED(hr)) {
-    DeleteFileA(path.c_str());
-    return std::string();
-  }
-  return path;
+  return result;
 }
 
 }  // namespace window_thumbnail

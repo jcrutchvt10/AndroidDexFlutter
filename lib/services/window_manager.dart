@@ -1,11 +1,20 @@
 import 'dart:ui' show Offset, Rect, Size;
-
 import 'package:flutter/foundation.dart';
 
 import '../core/models.dart';
+import 'native_desktop_windows.dart';
 
 /// How a window is currently tiled.
-enum WindowSnap { none, left, right, maximized }
+enum WindowSnap {
+  none,
+  left,
+  right,
+  maximized,
+  topLeft,
+  topRight,
+  bottomLeft,
+  bottomRight,
+}
 
 /// Mutable per-window geometry and lifecycle state.
 ///
@@ -17,6 +26,7 @@ class ManagedWindow {
     required this.origin,
     required this.extent,
     this.snap = WindowSnap.none,
+    this.pinned = false,
   });
 
   final DesktopAppWindow window;
@@ -26,23 +36,26 @@ class ManagedWindow {
 
   WindowSnap snap;
   bool minimized = false;
+  bool pinned = false;
   Offset? _restoreOrigin;
   Size? _restoreExtent;
 
   String get packageName => window.packageName;
   bool get maximized => snap == WindowSnap.maximized;
 
+  void togglePin() => pinned = !pinned;
+
   /// Windows cannot be shrunk below the usable minimum.
   static const minWidth = 320.0;
   static const minHeight = 240.0;
 
   void moveTo(Offset value) {
-    if (snap != WindowSnap.none) return; // A snapped window stays tiled.
+    if (snap != WindowSnap.none) unSnap(); // Dragging un-snaps and restores geometry.
     origin = value;
   }
 
   void resizeTo(Size value) {
-    if (snap != WindowSnap.none) return;
+    if (snap != WindowSnap.none) unSnap();
     extent = Size(
       value.width.clamp(minWidth, 4096.0),
       value.height.clamp(minHeight, 4096.0),
@@ -72,16 +85,30 @@ class ManagedWindow {
     }
     minimized = false;
     snap = target;
+    final halfWidth = desktop.width / 2;
+    final halfHeight = usableHeight / 2;
     switch (target) {
       case WindowSnap.left:
         origin = Offset.zero;
-        extent = Size(desktop.width / 2, usableHeight);
+        extent = Size(halfWidth, usableHeight);
       case WindowSnap.right:
-        origin = Offset(desktop.width / 2, 0);
-        extent = Size(desktop.width / 2, usableHeight);
+        origin = Offset(halfWidth, 0);
+        extent = Size(halfWidth, usableHeight);
       case WindowSnap.maximized:
         origin = Offset.zero;
         extent = Size(desktop.width, usableHeight);
+      case WindowSnap.topLeft:
+        origin = Offset.zero;
+        extent = Size(halfWidth, halfHeight);
+      case WindowSnap.topRight:
+        origin = Offset(halfWidth, 0);
+        extent = Size(halfWidth, halfHeight);
+      case WindowSnap.bottomLeft:
+        origin = Offset(0, halfHeight);
+        extent = Size(halfWidth, halfHeight);
+      case WindowSnap.bottomRight:
+        origin = Offset(halfWidth, halfHeight);
+        extent = Size(halfWidth, halfHeight);
       case WindowSnap.none:
         break;
     }
@@ -176,12 +203,18 @@ class WindowManager extends ChangeNotifier {
     final wasMinimized = entry.minimized;
     entry.minimized = false;
     if (identical(_windows.last, entry)) {
-      if (wasMinimized) notifyListeners();
+      if (wasMinimized) {
+        // Even if already focused, ensure Win32 HWND is on top after restore.
+        NativeDesktopWindows.raise(entry.window.processId);
+        notifyListeners();
+      }
       return;
     }
     _windows
       ..remove(entry)
       ..add(entry);
+    // Keep Win32 sibling z-order in sync with Dart focus order.
+    NativeDesktopWindows.raise(entry.window.processId);
     notifyListeners();
   }
 
@@ -233,6 +266,13 @@ class WindowManager extends ChangeNotifier {
     if (entry == null) return;
     entry.toggleMaximize(desktop, taskbarHeight);
     focus(packageName);
+  }
+
+  void togglePin(String packageName) {
+    final entry = forPackage(packageName);
+    if (entry == null) return;
+    entry.togglePin();
+    notifyListeners();
   }
 
   /// Re-tiles and clamps everything after a desktop resize.
