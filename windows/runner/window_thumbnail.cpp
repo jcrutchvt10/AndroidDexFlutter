@@ -141,7 +141,7 @@ std::vector<uint8_t> CaptureToPng(HWND hwnd) {
       hr = factory->CreateBitmapScaler(scaler.put());
       if (SUCCEEDED(hr)) {
         hr = scaler->Initialize(source_bitmap.get(), thumb_width,
-                                thumb_height);
+                                thumb_height, WICBitmapInterpolationModeLinear);
       }
 
       if (SUCCEEDED(hr)) {

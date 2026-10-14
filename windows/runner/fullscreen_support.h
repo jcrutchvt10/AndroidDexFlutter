@@ -10,10 +10,10 @@
 
 namespace {
 
-// Extracts a string result from the thumbnail helper, empty on failure.
+// Extracts raw PNG bytes from the thumbnail helper, empty on failure.
 flutter::EncodableValue CaptureThumbnailValue(HWND child) {
-  const std::string path = window_thumbnail::CaptureToPng(child);
-  return flutter::EncodableValue(path);
+  const std::vector<uint8_t> bytes = window_thumbnail::CaptureToPng(child);
+  return flutter::EncodableValue(bytes);
 }
 
 // Switches |host| between its saved placement and borderless fullscreen on

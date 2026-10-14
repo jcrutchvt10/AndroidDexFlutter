@@ -19,17 +19,17 @@ class FlutterWindow : public Win32Window {
   explicit FlutterWindow(const flutter::DartProject& project);
   virtual ~FlutterWindow();
 
+  /// Called by MouseHookProc when a click lands on an embedded surface.
+  /// Looks up the PID for |surface| and invokes "surfaceClicked" on the
+  /// Dart method channel so WindowManager.focus() stays in sync.
+  void NotifySurfaceClicked(HWND surface);
+
  protected:
   // Win32Window:
   bool OnCreate() override;
   void OnDestroy() override;
   LRESULT MessageHandler(HWND window, UINT const message, WPARAM const wparam,
                          LPARAM const lparam) noexcept override;
-
-  /// Called by MouseHookProc when a click lands on an embedded surface.
-  /// Looks up the PID for |surface| and invokes "surfaceClicked" on the
-  /// Dart method channel so WindowManager.focus() stays in sync.
-  void NotifySurfaceClicked(HWND surface);
 
  private:
   // The project to run.

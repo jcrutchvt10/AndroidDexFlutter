@@ -21,7 +21,6 @@ HHOOK g_mouse_hook = nullptr;
 
 // Pointer to the FlutterWindow instance so MouseHookProc can notify Dart
 // via the method channel when a surface is clicked.
-class FlutterWindow;
 FlutterWindow* g_flutter_window = nullptr;
 
 // Moves keyboard focus into an embedded Android surface.
@@ -389,5 +388,5 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       break;
   }
 
-  return Win32Window::MessageHandler(window, message, wparam, lparam);
+  return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
 }
